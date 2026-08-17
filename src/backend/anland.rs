@@ -394,7 +394,15 @@ impl Anland {
         raw_fd: RawFd,
         info: &anland_sys::buf_info,
     ) -> anyhow::Result<Dmabuf> {
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        // Take our own duplicate of the fd. The C producer context retains the
+        // original in ctx->dmabuf_fds and closes it on disconnect/reconnect; if we
+        // took ownership of the same fd directly, our Dmabuf would keep a now-closed
+        // descriptor after a reconnect and every subsequent bind would fail with
+        // EBADF (black screen), while releasing it here would double-close C's copy.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        let owned_fd = borrowed_fd
+            .try_clone_to_owned()
+            .context("failed to duplicate dmabuf fd")?;
 
         let fourcc = protocol_format_to_fourcc(info.format);
 
