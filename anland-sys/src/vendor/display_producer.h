@@ -19,8 +19,10 @@ typedef struct display_ctx display_ctx;
  * fallback (see set_fallback_callback) and the loop resumes.
  */
 
-/* Connect to the daemon and fetch screen info only. Leaves the context in
- * fallback: it does NOT pick up consumer fds or dmabufs. Returns 0 / -1. */
+/* Connect to the daemon and fetch screen info only (bounded wait; falls back to a
+ * default screen if no consumer has connected yet, so the compositor can still
+ * boot). Leaves the context in fallback: it does NOT pick up consumer fds or
+ * dmabufs. Returns 0 / -1. */
 int  connect_to_deamon(display_ctx **ctx, const char *socket_path);
 
 /* Tear down everything and disconnect from the daemon. */
@@ -54,8 +56,6 @@ int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *ev
 int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
 
 bool is_fallback(display_ctx *ctx);
-bool peer_alive(display_ctx *ctx);
-void force_fallback(display_ctx *ctx);
 
 /* Attempt to leave fallback: pick up the consumer fds and immediately receive the
  * dmabuf set (the consumer sends the dmabufs right after the fd handshake). Clears

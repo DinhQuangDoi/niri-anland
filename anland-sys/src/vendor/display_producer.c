@@ -3,6 +3,7 @@
 #include "socket_utils.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -15,6 +16,17 @@
 /* poll() timeout (ms) for the two reconnect handshake steps. Kept short so the
  * caller's reconnect loop stays responsive when no consumer is present yet. */
 #define HANDSHAKE_TIMEOUT_MS 100
+
+/* Screen geometry used when the daemon has no consumer connected yet. The real
+ * size is picked up from the daemon-pushed SCREEN_INFO the moment a consumer
+ * connects (see read_pending_screen_info). */
+#define FALLBACK_SCREEN_WIDTH  1080
+#define FALLBACK_SCREEN_HEIGHT 2400
+#define FALLBACK_REFRESH_MHZ   60000
+
+/* State-machine logging: goes to the compositor's stderr/journal so the
+ * producer's connect/reconnect handshake can be followed without adb. */
+#define ANLAND_LOG(fmt, ...) fprintf(stderr, "anland: " fmt "\n", ##__VA_ARGS__)
 
 struct display_ctx {
     int      ctrl_fd;
@@ -70,6 +82,8 @@ static void enter_fallback(display_ctx *ctx)
 
     release_consumer_resources(ctx);
 
+    ANLAND_LOG("consumer lost, entering fallback");
+
     if (ctx->fallback_cb)
         ctx->fallback_cb(ctx->fallback_userdata);
 }
@@ -97,6 +111,7 @@ static int pickup_fds(display_ctx *ctx)
     if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 5) {
         for (int i = 0; i < fd_count; i++)
             close(fds[i]);
+        ANLAND_LOG("pickup_fds failed (n=%d, type=%u, fds=%d)", n, n > 0 ? resp.type : 0, fd_count);
         return -1;
     }
 
@@ -109,11 +124,23 @@ static int pickup_fds(display_ctx *ctx)
     ctx->shm_fd           = fds[3];
     ctx->audio_fd         = fds[4];
 
+    /* The producer must never block its event loop on the buffer-ready eventfd: a
+     * stale event source may have already drained the counter, and a blocking read
+     * would stall the compositor. The data_fd reads are all poll-guarded, so it is
+     * left blocking (recv_all has no EAGAIN handling). */
+    {
+        int flags = fcntl(ctx->buf_ready_efd, F_GETFL);
+        if (flags >= 0)
+            fcntl(ctx->buf_ready_efd, F_SETFL, flags | O_NONBLOCK);
+    }
+
     ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ, MAP_SHARED, ctx->shm_fd, 0);
     if (ctx->shm_ptr == MAP_FAILED) {
         ctx->shm_ptr = NULL;
         return -1;
     }
+
+    ANLAND_LOG("picked up consumer fds");
     return 0;
 }
 
@@ -166,7 +193,42 @@ static int receive_dmabufs(display_ctx *ctx)
         ctx->dmabuf_infos[i] = infos[i];
     }
     ctx->buf_count = count;
+
+    ANLAND_LOG("received %d dmabufs", count);
     return 0;
+}
+
+/*
+ * Drain a daemon-pushed SCREEN_INFO from ctrl_fd, if one is pending, updating the
+ * context's screen geometry. The daemon pushes SCREEN_INFO to a producer that was
+ * registered before any consumer connected, the moment a consumer shows up. Use
+ * MSG_PEEK so non-SCREEN_INFO messages (e.g. FDS_READY) are left for pickup_fds().
+ */
+static void read_pending_screen_info(display_ctx *ctx)
+{
+    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
+    if (poll(&pfd, 1, 0) <= 0)
+        return;
+
+    uint8_t buf[sizeof(struct ctrl_msg) + sizeof(struct screen_info)];
+    ssize_t n = recv(ctx->ctrl_fd, buf, sizeof(buf), MSG_PEEK | MSG_DONTWAIT);
+    if (n < (ssize_t)sizeof(struct ctrl_msg))
+        return;
+
+    struct ctrl_msg resp;
+    memcpy(&resp, buf, sizeof(resp));
+    if (resp.type != CTRL_MSG_SCREEN_INFO || resp.size != sizeof(struct screen_info))
+        return;
+
+    if (recv_all(ctx->ctrl_fd, buf, sizeof(struct ctrl_msg) + sizeof(struct screen_info)) < 0)
+        return;
+
+    struct screen_info si;
+    memcpy(&si, buf + sizeof(struct ctrl_msg), sizeof(si));
+    ctx->screen_w = si.width;
+    ctx->screen_h = si.height;
+    ctx->pixel_format = si.format;
+    ctx->refresh = si.refresh;
 }
 
 int connect_to_deamon(display_ctx **out, const char *socket_path)
@@ -195,25 +257,40 @@ int connect_to_deamon(display_ctx **out, const char *socket_path)
     if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
         goto fail;
 
-    uint8_t buf[sizeof(struct ctrl_msg) + sizeof(struct screen_info)];
-    if (recv_all(ctx->ctrl_fd, buf, sizeof(buf)) < 0)
-        goto fail;
+    /* Wait (bounded) for the daemon's SCREEN_INFO reply. If a consumer is already
+     * up this arrives immediately; if not, the daemon holds the reply until a
+     * consumer connects. Never block indefinitely: boot with a fallback screen and
+     * pick up the real size from the reconnect loop (see try_exit_fallback). */
+    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
+    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) > 0) {
+        uint8_t buf[sizeof(struct ctrl_msg) + sizeof(struct screen_info)];
+        if (recv_all(ctx->ctrl_fd, buf, sizeof(buf)) < 0)
+            goto fail;
 
-    struct ctrl_msg resp;
-    memcpy(&resp, buf, sizeof(resp));
-    if (resp.type != CTRL_MSG_SCREEN_INFO || resp.size != sizeof(struct screen_info))
-        goto fail;
+        struct ctrl_msg resp;
+        memcpy(&resp, buf, sizeof(resp));
+        if (resp.type != CTRL_MSG_SCREEN_INFO || resp.size != sizeof(struct screen_info))
+            goto fail;
 
-    struct screen_info si;
-    memcpy(&si, buf + sizeof(struct ctrl_msg), sizeof(si));
-    ctx->screen_w = si.width;
-    ctx->screen_h = si.height;
-    ctx->pixel_format = si.format;
-    ctx->refresh = si.refresh;
+        struct screen_info si;
+        memcpy(&si, buf + sizeof(struct ctrl_msg), sizeof(si));
+        ctx->screen_w = si.width;
+        ctx->screen_h = si.height;
+        ctx->pixel_format = si.format;
+        ctx->refresh = si.refresh;
+    } else {
+        ctx->screen_w = FALLBACK_SCREEN_WIDTH;
+        ctx->screen_h = FALLBACK_SCREEN_HEIGHT;
+        ctx->pixel_format = 0;
+        ctx->refresh = FALLBACK_REFRESH_MHZ;
+    }
 
-    // Daemon handshake only: screen info is in hand, but the consumer fds and
-    // dmabufs are deliberately left for try_exit_fallback() so the backend brings
-    // the consumer up through the single reconnect path. Stay in fallback.
+    // Daemon handshake only: screen info is in hand (real or fallback), but the
+    // consumer fds and dmabufs are deliberately left for try_exit_fallback() so
+    // the backend brings the consumer up through the single reconnect path. Stay
+    // in fallback.
+    ANLAND_LOG("daemon handshake done, screen %ux%u fmt=%u refresh=%u",
+               ctx->screen_w, ctx->screen_h, ctx->pixel_format, ctx->refresh);
     *out = ctx;
     return 0;
 
@@ -292,17 +369,10 @@ int trigger_refresh(display_ctx *ctx)
         c->cmsg_len = CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
     }
-    ssize_t sent = sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     if (ctx->pending_render_fence >= 0) {
         close(ctx->pending_render_fence);
         ctx->pending_render_fence = -1;
-    }
-    if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-        /* The consumer closed its end of the fence channel (fell back, stopped, or
-         * restarted for a rotation/resize): the connection is dead. Enter fallback
-         * so the backend's reconnect path re-picks-up the consumer's fresh fds. */
-        enter_fallback(ctx);
-        return -1;
     }
     return 0;
 }
@@ -403,54 +473,35 @@ bool is_fallback(display_ctx *ctx)
     return ctx->fallback;
 }
 
-
-/* True while the consumer link looks alive: the data channel has no HUP/ERR.
- * Cheap non-blocking check for the backend's periodic watchdog, so a consumer
- * that dies while the producer is idle is detected even without any renders. */
-bool peer_alive(display_ctx *ctx)
-{
-    if (ctx->fallback || ctx->data_fd < 0)
-        return false;
-    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
-    int ret = poll(&pfd, 1, 0);
-    if (ret < 0)
-        return false;
-    return !(pfd.revents & (POLLHUP | POLLERR));
-}
-
-/* Force the context into fallback so the backend's reconnect path re-picks-up
- * the consumer's fresh fds (used when the watchdog detects a dead link). */
-void force_fallback(display_ctx *ctx)
-{
-    enter_fallback(ctx);
-}
-
 int try_exit_fallback(display_ctx *ctx)
 {
     if (!ctx->fallback)
         return 0;
 
+    // Refresh screen geometry if the daemon already pushed a SCREEN_INFO, then
+    // again after pickup_fds: the daemon delivers FDS_READY before SCREEN_INFO, so
+    // a reconnect tick racing the consumer's connect may see either ordering.
+    read_pending_screen_info(ctx);
+
     // Step 1: ask the daemon to hand over the consumer-side fds.
     if (pickup_fds(ctx) < 0) {
-        fprintf(stderr, "anland: try_exit_fallback FAILED at pickup_fds (errno=%d %s)\n",
-                errno, strerror(errno));
         release_consumer_resources(ctx);
         return -1;
     }
-    fprintf(stderr, "anland: pickup_fds ok, data_fd=%d\n", ctx->data_fd);
+
+    read_pending_screen_info(ctx);
 
     // Step 2: immediately pull the dmabuf set the consumer pushes right after the
     // fd handshake. Only leave fallback once both fds and dmabufs are in hand, so
     // the backend can import straight away.
     if (receive_dmabufs(ctx) < 0) {
-        fprintf(stderr, "anland: try_exit_fallback FAILED at receive_dmabufs (errno=%d %s)\n",
-                errno, strerror(errno));
         release_consumer_resources(ctx);
         return -1;
     }
-    fprintf(stderr, "anland: receive_dmabufs ok, buf_count=%d\n", ctx->buf_count);
 
     ctx->fallback = false;
+
+    ANLAND_LOG("left fallback, consumer ready");
     return 0;
 }
 
