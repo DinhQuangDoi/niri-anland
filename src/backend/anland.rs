@@ -120,6 +120,16 @@ pub struct Anland {
 
     dmabufs: Vec<Dmabuf>,
 
+    // Frame counter and, per dmabuf slot, the frame number it was last
+    // rendered into (-1 = never rendered). The consumer cycles its BufferQueue
+    // slots (here 4), so a reused slot holds content from
+    // `frame_count - last_frame_per_buffer[i]` frames ago; reporting that as
+    // the buffer age lets the damage tracker repaint exactly the regions that
+    // changed since, instead of doing a full repaint every frame (which drops
+    // the refresh rate).
+    frame_count: u64,
+    last_frame_per_buffer: Vec<i64>,
+
     reconnect_timer_token: Option<RegistrationToken>,
     buf_ready_source_token: Option<RegistrationToken>,
     data_source_token: Option<RegistrationToken>,
@@ -165,6 +175,8 @@ impl Anland {
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             debug_tint: false,
             pending_clipboard: None,
+            frame_count: 0,
+            last_frame_per_buffer: Vec::new(),
         })
     }
 
@@ -319,6 +331,8 @@ impl Anland {
         }
 
         self.dmabufs.clear();
+        self.last_frame_per_buffer.clear();
+        self.frame_count = 0;
 
         for i in 0..count {
             let raw_fd = self.ctx.dmabuf_fd_at(i as i32);
@@ -334,6 +348,8 @@ impl Anland {
                 Err(e) => warn!("failed to import dmabuf {}: {e:?}", i),
             }
         }
+
+        self.last_frame_per_buffer.resize(self.dmabufs.len(), -1);
 
         info!(
             "connected to anland consumer: {} buffers, {}x{}",
@@ -723,12 +739,20 @@ impl Anland {
             return RenderResult::Skipped;
         }
 
-        // Always repaint the full frame: the consumer cycles its BufferQueue
-        // slots (usually 3), so a reused buffer holds content from ~3 frames
-        // ago, not the immediately previous frame. Reporting age 1 would make
-        // the damage tracker repaint only the damaged region onto stale
-        // content, producing flicker around moving elements (cursor, new tabs).
-        let age = 0;
+        // The consumer cycles its BufferQueue slots (here 4), so a reused slot
+        // holds the frame rendered `frame_count - last_frame_per_buffer[idx]`
+        // frames ago. Report that as the buffer age so the damage tracker
+        // repaints exactly the regions that changed in between. Age 0 (a
+        // fresh/reused buffer we cannot reconstruct) makes the tracker repaint
+        // the whole frame, which keeps correctness at the cost of a full draw.
+        let last = self.last_frame_per_buffer[idx as usize];
+        let age = if last >= 0 {
+            (self.frame_count - last as u64) as usize
+        } else {
+            0
+        };
+        self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
+        self.frame_count = self.frame_count.wrapping_add(1);
 
         let ctx = RenderCtx {
             renderer: &mut self.renderer,
