@@ -1,0 +1,16 @@
+[package]
+name = "anland-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Rust FFI bindings for the anland display producer library"
+license = "MIT"
+
+[build-dependencies]
+cc = "1.2"
+
+[dependencies]
+libloading = "0.8"
+
+[[example]]
+name = "test_anland"
+path = "examples/test_anland.rs"

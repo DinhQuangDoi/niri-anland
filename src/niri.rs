@@ -116,7 +116,7 @@ use wayland_server::protocol::wl_output::WlOutput;
 use crate::a11y::A11y;
 use crate::animation::Clock;
 use crate::backend::tty::SurfaceDmabufFeedback;
-use crate::backend::{Backend, Headless, RenderResult, Tty, Winit};
+use crate::backend::{Anland, Backend, Headless, RenderResult, Tty, Winit};
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_locale1::Locale1ToNiri;
@@ -715,10 +715,19 @@ impl State {
         let has_display = env::var_os("WAYLAND_DISPLAY").is_some()
             || env::var_os("WAYLAND_SOCKET").is_some()
             || env::var_os("DISPLAY").is_some();
+        let has_anland =
+            env::var_os("ANLAND_SOCKET").is_some() || env::var_os("ANLAND_SOCKET_PATH").is_some();
 
         let mut backend = if headless {
             let headless = Headless::new();
             Backend::Headless(headless)
+        } else if has_anland {
+            let socket = env::var("ANLAND_SOCKET")
+                .or_else(|_| env::var("ANLAND_SOCKET_PATH"))
+                .unwrap_or_else(|_| "/run/display.sock".into());
+            let anland =
+                Anland::new(socket).context("error initializing anland backend")?;
+            Backend::Anland(anland)
         } else if has_display {
             let winit = Winit::new(config.clone(), event_loop.clone())?;
             Backend::Winit(winit)

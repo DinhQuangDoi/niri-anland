@@ -29,6 +29,9 @@ pub struct Cli {
     /// Command to run upon compositor startup.
     #[arg(last = true)]
     pub command: Vec<OsString>,
+    /// Use the anland backend (renders into the anland daemon's dmabufs).
+    #[arg(long)]
+    pub anland: bool,
 
     #[command(subcommand)]
     pub subcommand: Option<Sub>,
