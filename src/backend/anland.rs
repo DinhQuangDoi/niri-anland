@@ -832,7 +832,11 @@ impl Anland {
 
 fn protocol_format_to_fourcc(format: u32) -> Fourcc {
     match format {
-        0x34325241 | 0x41425234 | 0x08 | 0x01 => Fourcc::Argb8888,
+        0x34325241 | 0x41425234 | 0x08 => Fourcc::Argb8888,
+        // Consumer-side format 1 == Android RGBA_8888 (AHARDWAREBUFFER
+        // R8G8B8A8_UNORM): byte order R,G,B,A in memory == DRM ABGR8888.
+        // Importing it as ARGB8888 (B,G,R,A) rendered every pixel R<->B swapped.
+        0x01 => Fourcc::Abgr8888,
         0x34325258 | 0x58425234 | 0x0c | 0x02 => Fourcc::Xrgb8888,
         0x32335241 | 0x41425233 | 0x09 | 0x03 => Fourcc::Abgr8888,
         0x32335258 | 0x58425233 | 0x0d | 0x04 => Fourcc::Xbgr8888,
