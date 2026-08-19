@@ -3,7 +3,9 @@ name: build
 on:
   push:
     branches:
-      - main
+      - anland
+    tags:
+      - '*-anland.*'
   workflow_dispatch:
 
 env:
