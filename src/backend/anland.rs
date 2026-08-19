@@ -853,15 +853,12 @@ impl Anland {
         // frees a buffer) at 150-300 fps into a 120 Hz panel -> uneven pacing that
         // looks like judder/low-Hz. With a real presentation time, animations step
         // at the display cadence.
+        //
+        // NB: do NOT reset redraw_state here; queue_estimated_vblank_timer() below
+        // consumes it (it expects Queued / WaitingForEstimatedVBlank*), so leaving
+        // it as-is is required.
         let output_state = niri.output_state.get_mut(output).unwrap();
         output_state.frame_clock.presented(now);
-        match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
-            RedrawState::Idle => unreachable!(),
-            RedrawState::Queued => (),
-            RedrawState::WaitingForVBlank { .. } => unreachable!(),
-            RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
-            RedrawState::WaitingForEstimatedVBlankAndQueued(_) => unreachable!(),
-        }
         output_state.frame_callback_sequence =
             output_state.frame_callback_sequence.wrapping_add(1);
 
