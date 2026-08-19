@@ -3728,7 +3728,7 @@ impl Niri {
                     output_scale,
                     1.,
                     Kind::Cursor,
-                    &mut |elem| push(AlwaysDamagedElement::new(elem).into()),
+                    &mut |elem| push(elem.into()),
                 );
             }
             RenderCursor::Named {
