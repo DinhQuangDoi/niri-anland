@@ -132,6 +132,9 @@ pub struct Anland {
 
     // Frame timing for debugging
     frame_times: std::collections::VecDeque<u64>,
+    // Present-interval debugging: wall-clock gap between successive render() calls.
+    last_render_at: Option<Instant>,
+    present_intervals: std::collections::VecDeque<u64>,
 
     reconnect_timer_token: Option<RegistrationToken>,
     buf_ready_source_token: Option<RegistrationToken>,
@@ -181,6 +184,8 @@ impl Anland {
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
             frame_times: std::collections::VecDeque::new(),
+            last_render_at: None,
+            present_intervals: std::collections::VecDeque::new(),
         })
     }
 
@@ -845,17 +850,43 @@ impl Anland {
         if self.frame_times.len() > 60 {
             self.frame_times.pop_front();
         }
+        // Present interval = wall-clock gap between successive render() calls. This
+        // is the perceived frame rate (unlike frame_time, which is only how long
+        // our render() body took). A large gap here with a tiny frame_time means
+        // niri is not being *asked* to redraw often enough (scheduling), not that
+        // rendering is slow.
+        let now = Instant::now();
+        if let Some(prev) = self.last_render_at {
+            let gap_ms = now.duration_since(prev).as_millis() as u64;
+            self.present_intervals.push_back(gap_ms);
+            if self.present_intervals.len() > 60 {
+                self.present_intervals.pop_front();
+            }
+        }
+        self.last_render_at = Some(now);
         if self.frame_count % 60 == 0 && !self.frame_times.is_empty() {
             let avg: u64 = self.frame_times.iter().sum::<u64>() / self.frame_times.len() as u64;
             let max = *self.frame_times.iter().max().unwrap_or(&0);
             let min = *self.frame_times.iter().min().unwrap_or(&0);
+            let (iavg, imax, imin) = if !self.present_intervals.is_empty() {
+                let s: u64 = self.present_intervals.iter().sum();
+                (
+                    s / self.present_intervals.len() as u64,
+                    *self.present_intervals.iter().max().unwrap_or(&0),
+                    *self.present_intervals.iter().min().unwrap_or(&0),
+                )
+            } else {
+                (0, 0, 0)
+            };
             info!(
-                "frame timing (last {} frames): avg={}ms max={}ms min={}ms (~{}fps)",
-                self.frame_times.len(),
+                "frame timing: render avg={}ms max={}ms min={}ms | present-interval avg={}ms max={}ms min={}ms (~{}fps presented)",
                 avg,
                 max,
                 min,
-                1000 / avg.max(1)
+                iavg,
+                imax,
+                imin,
+                1000 / iavg.max(1)
             );
         }
 
