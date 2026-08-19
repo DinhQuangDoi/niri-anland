@@ -126,7 +126,6 @@ pub struct Anland {
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
-    last_buffer_idx: i32,
     debug_tint: bool,
 
     // Clipboard text received from the Android consumer (anland INPUT_TYPE_CLIPBOARD),
@@ -164,7 +163,6 @@ impl Anland {
             buf_ready_source_token: None,
             data_source_token: None,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
-            last_buffer_idx: -1,
             debug_tint: false,
             pending_clipboard: None,
         })
@@ -321,7 +319,6 @@ impl Anland {
         }
 
         self.dmabufs.clear();
-        self.last_buffer_idx = -1;
 
         for i in 0..count {
             let raw_fd = self.ctx.dmabuf_fd_at(i as i32);
@@ -726,14 +723,12 @@ impl Anland {
             return RenderResult::Skipped;
         }
 
-        // Only report a buffer age of 1 to the damage tracker when we're
-        // rendering into the same buffer as the previous frame. The consumer
-        // hands out buffers through its shared-memory index, so consecutive
-        // frames usually land on different dmabufs; claiming age 1 there would
-        // make the tracker repaint only the damaged region onto a buffer that
-        // still holds stale content, producing flicker.
-        let age = if idx == self.last_buffer_idx { 1 } else { 0 };
-        self.last_buffer_idx = idx;
+        // Always repaint the full frame: the consumer cycles its BufferQueue
+        // slots (usually 3), so a reused buffer holds content from ~3 frames
+        // ago, not the immediately previous frame. Reporting age 1 would make
+        // the damage tracker repaint only the damaged region onto stale
+        // content, producing flicker around moving elements (cursor, new tabs).
+        let age = 0;
 
         let ctx = RenderCtx {
             renderer: &mut self.renderer,
