@@ -4,7 +4,7 @@ use std::mem;
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use niri_config::OutputName;
@@ -130,6 +130,9 @@ pub struct Anland {
     frame_count: u64,
     last_frame_per_buffer: Vec<i64>,
 
+    // Frame timing for debugging
+    frame_times: std::collections::VecDeque<u64>,
+
     reconnect_timer_token: Option<RegistrationToken>,
     buf_ready_source_token: Option<RegistrationToken>,
     data_source_token: Option<RegistrationToken>,
@@ -177,6 +180,7 @@ impl Anland {
             pending_clipboard: None,
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
+            frame_times: std::collections::VecDeque::new(),
         })
     }
 
@@ -729,6 +733,7 @@ impl Anland {
         _target_presentation_time: Duration,
     ) -> RenderResult {
         let _span = tracy_client::span!("Anland::render");
+        let frame_start = Instant::now();
 
         if self.ctx.is_fallback() {
             return RenderResult::Skipped;
@@ -834,6 +839,25 @@ impl Anland {
         }
         output_state.frame_callback_sequence =
             output_state.frame_callback_sequence.wrapping_add(1);
+
+        let frame_time_ms = frame_start.elapsed().as_millis() as u64;
+        self.frame_times.push_back(frame_time_ms);
+        if self.frame_times.len() > 60 {
+            self.frame_times.pop_front();
+        }
+        if self.frame_count % 60 == 0 && !self.frame_times.is_empty() {
+            let avg: u64 = self.frame_times.iter().sum::<u64>() / self.frame_times.len() as u64;
+            let max = *self.frame_times.iter().max().unwrap_or(&0);
+            let min = *self.frame_times.iter().min().unwrap_or(&0);
+            info!(
+                "frame timing (last {} frames): avg={}ms max={}ms min={}ms (~{}fps)",
+                self.frame_times.len(),
+                avg,
+                max,
+                min,
+                1000 / avg.max(1)
+            );
+        }
 
         RenderResult::Submitted
     }
