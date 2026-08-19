@@ -829,6 +829,10 @@ impl Anland {
             warn!("error waiting for frame completion: {err:?}");
         }
 
+        // Release the renderer bind (GlesTarget borrows &mut self.renderer) before
+        // we take &mut self again for queue_estimated_vblank_timer below.
+        drop(target);
+
         niri.update_primary_scanout_output(output, &res.states);
 
         self.ctx.set_render_fence(-1);
