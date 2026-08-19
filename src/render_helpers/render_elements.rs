@@ -2,6 +2,7 @@ use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, Unde
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
 use smithay::utils::{Buffer, Physical, Rectangle, Scale, Transform};
 
+#[derive(Debug)]
 pub struct AlwaysDamagedElement<E>(E);
 
 impl<E> AlwaysDamagedElement<E> {
