@@ -195,7 +195,6 @@ impl Anland {
         let info = self.ctx.screen_info();
         let (w, h) = (info.width as i32, info.height as i32);
         let refresh = info.refresh as i32;
-
         let output = Output::new(
             "anland".to_string(),
             PhysicalProperties {
@@ -253,7 +252,17 @@ impl Anland {
 
         self.damage_tracker = Some(OutputDamageTracker::from_output(&output));
         self.output = Some(output.clone());
-        niri.add_output(output, None, false);
+        // Pace niri to the display refresh instead of free-running. info.refresh is
+        // in mHz (e.g. 120000 for 120 Hz); the frame clock + estimated-vblank timer
+        // then advance animations in even refresh-interval steps.
+        let refresh_interval = if info.refresh > 0 {
+            Some(Duration::from_nanos(
+                1_000_000_000_000u64 / info.refresh as u64,
+            ))
+        } else {
+            None
+        };
+        niri.add_output(output, refresh_interval, false);
 
         self.start_reconnect_timer(niri);
     }
@@ -735,7 +744,7 @@ impl Anland {
         &mut self,
         niri: &mut Niri,
         output: &Output,
-        _target_presentation_time: Duration,
+        target_presentation_time: Duration,
     ) -> RenderResult {
         let _span = tracy_client::span!("Anland::render");
         let frame_start = Instant::now();
@@ -827,14 +836,21 @@ impl Anland {
 
         let mut presentation_feedbacks =
             niri.take_presentation_feedbacks(output, &res.states);
+        let now = get_monotonic_time();
         presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
-            get_monotonic_time(),
+            now,
             Refresh::Unknown,
             0,
             wp_presentation_feedback::Kind::empty(),
         );
 
+        // Feed the frame clock so next_presentation_time() advances in refresh-rate
+        // steps. Without this, niri free-runs (renders the instant the consumer
+        // frees a buffer) at 150-300 fps into a 120 Hz panel -> uneven pacing that
+        // looks like judder/low-Hz. With a real presentation time, animations step
+        // at the display cadence.
         let output_state = niri.output_state.get_mut(output).unwrap();
+        output_state.frame_clock.presented(now);
         match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
             RedrawState::Idle => unreachable!(),
             RedrawState::Queued => (),
@@ -844,6 +860,13 @@ impl Anland {
         }
         output_state.frame_callback_sequence =
             output_state.frame_callback_sequence.wrapping_add(1);
+
+        // Pace to the display refresh: queue a timer at the predicted next vblank.
+        // redraw_queued_outputs only redraws outputs in Queued state, so parking in
+        // WaitingForEstimatedVBlank throttles the free-running render loop to the
+        // panel's refresh interval. buffer_ready / input still promote to
+        // ...AndQueued so we never miss a needed frame.
+        self.queue_estimated_vblank_timer(niri, output.clone(), target_presentation_time);
 
         let frame_time_ms = frame_start.elapsed().as_millis() as u64;
         self.frame_times.push_back(frame_time_ms);
@@ -891,6 +914,78 @@ impl Anland {
         }
 
         RenderResult::Submitted
+    }
+
+    // Pace the free-running render loop to the display refresh. After a render we
+    // park redraw_state in WaitingForEstimatedVBlank so redraw_queued_outputs()
+    // won't immediately re-render; a timer fires at the predicted next vblank and
+    // either re-queues (if an animation is ongoing) or just sends frame callbacks.
+    fn queue_estimated_vblank_timer(
+        &mut self,
+        niri: &mut Niri,
+        output: Output,
+        target_presentation_time: Duration,
+    ) {
+        let output_state = niri.output_state.get_mut(&output).unwrap();
+        match mem::take(&mut output_state.redraw_state) {
+            RedrawState::Idle => unreachable!(),
+            RedrawState::Queued => (),
+            RedrawState::WaitingForVBlank { .. } => unreachable!(),
+            RedrawState::WaitingForEstimatedVBlank(token)
+            | RedrawState::WaitingForEstimatedVBlankAndQueued(token) => {
+                output_state.redraw_state = RedrawState::WaitingForEstimatedVBlank(token);
+                return;
+            }
+        }
+
+        let now = get_monotonic_time();
+        let mut duration = target_presentation_time.saturating_sub(now);
+        if duration.is_zero() {
+            duration += output_state
+                .frame_clock
+                .refresh_interval()
+                .unwrap_or(Duration::from_micros(8_333));
+        }
+
+        let timer = Timer::from_duration(duration);
+        let token = niri
+            .event_loop
+            .insert_source(timer, move |_, _, state| {
+                state
+                    .backend
+                    .anland()
+                    .on_estimated_vblank_timer(&mut state.niri, output.clone());
+                TimeoutAction::Drop
+            })
+            .unwrap();
+        output_state.redraw_state = RedrawState::WaitingForEstimatedVBlank(token);
+    }
+
+    fn on_estimated_vblank_timer(&self, niri: &mut Niri, output: Output) {
+        let Some(output_state) = niri.output_state.get_mut(&output) else {
+            return;
+        };
+
+        output_state.frame_callback_sequence =
+            output_state.frame_callback_sequence.wrapping_add(1);
+
+        match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
+            RedrawState::Idle => unreachable!(),
+            RedrawState::Queued => unreachable!(),
+            RedrawState::WaitingForVBlank { .. } => unreachable!(),
+            RedrawState::WaitingForEstimatedVBlank(_) => (),
+            // The timer fired just in front of a redraw.
+            RedrawState::WaitingForEstimatedVBlankAndQueued(_) => {
+                output_state.redraw_state = RedrawState::Queued;
+                return;
+            }
+        }
+
+        if output_state.unfinished_animations_remain {
+            niri.queue_redraw(&output);
+        } else {
+            niri.send_frame_callbacks(&output);
+        }
     }
 
     // -------------------------------------------------------------------
