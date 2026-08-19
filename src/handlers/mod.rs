@@ -43,7 +43,8 @@ use smithay::wayland::security_context::{
     SecurityContext, SecurityContextHandler, SecurityContextListenerSource,
 };
 use smithay::wayland::selection::data_device::{
-    set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
+    request_data_device_client_selection, set_data_device_focus, DataDeviceHandler, DataDeviceState,
+    WaylandDndGrabHandler,
 };
 use smithay::wayland::selection::ext_data_control::{
     DataControlHandler as ExtDataControlHandler, DataControlState as ExtDataControlState,
@@ -289,8 +290,8 @@ impl SelectionHandler for State {
     fn new_selection(
         &mut self,
         ty: SelectionTarget,
-        source: Option<SelectionSource>,
-        _seat: Seat<Self>,
+        _source: Option<SelectionSource>,
+        seat: Seat<Self>,
     ) {
         let _span = tracy_client::span!("new_selection");
 
@@ -298,17 +299,11 @@ impl SelectionHandler for State {
         if ty != SelectionTarget::Clipboard {
             return;
         }
-        let Some(source) = source else {
-            return;
-        };
 
-        let mime = String::from("text/plain");
-        if !source.contains_mime_type(&mime) {
-            return;
-        }
-
-        // Read the selection data over a pipe on a background thread, then hand
-        // the bytes to the main event loop to push through the anland backend.
+        // Read the client selection over a pipe on a background thread, then
+        // hand the bytes to the main event loop to push through the anland
+        // backend. request_data_device_client_selection() asks the focused
+        // client to write the text/plain data into the provided fd.
         let (tx, rx) = calloop::channel::sync_channel::<Vec<u8>>(1);
         self.niri
             .event_loop
@@ -327,7 +322,14 @@ impl SelectionHandler for State {
                 return;
             }
         };
-        source.send(mime, write_fd.into());
+        if let Err(err) = request_data_device_client_selection(
+            &seat,
+            String::from("text/plain"),
+            write_fd.into(),
+        ) {
+            warn!("error requesting clipboard selection: {err:?}");
+            return;
+        }
         thread::spawn(move || {
             let mut bytes = Vec::new();
             if let Err(err) = File::from(read_fd).read_to_end(&mut bytes) {

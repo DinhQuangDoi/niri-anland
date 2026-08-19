@@ -512,7 +512,7 @@ impl Anland {
     }
 
     /// Push a text clipboard update to the Android consumer.
-    pub fn push_clipboard(&self, text: &[u8]) {
+    pub fn push_clipboard(&mut self, text: &[u8]) {
         let event = OutputEvent {
             type_: OUTPUT_TYPE_CLIPBOARD,
             clipboard: OutputClipboard {
