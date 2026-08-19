@@ -770,7 +770,7 @@ impl Anland {
         };
 
         let damage_tracker = self.damage_tracker.as_mut().unwrap();
-        let res = match damage_tracker.render_output(
+        let mut res = match damage_tracker.render_output(
             &mut self.renderer,
             &mut target,
             age,
@@ -783,6 +783,28 @@ impl Anland {
                 return RenderResult::Skipped;
             }
         };
+
+        // The consumer hands out a rotating pool of buffers, so the slot we
+        // just got may hold pixels from an older frame. When the damage
+        // tracker reports nothing to redraw it skips rendering entirely and
+        // `res.damage` is None, which would leave us presenting stale content
+        // -> blink. Re-render the whole frame (age 0) so the buffer is never
+        // stale.
+        if res.damage.is_none() {
+            res = match damage_tracker.render_output(
+                &mut self.renderer,
+                &mut target,
+                0,
+                &elements,
+                [0.0, 0.0, 0.0, 1.0],
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("render error: {e:?}");
+                    return RenderResult::Skipped;
+                }
+            };
+        }
 
         if let Err(err) = res.sync.wait() {
             warn!("error waiting for frame completion: {err:?}");
