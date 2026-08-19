@@ -26,6 +26,7 @@ use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_pre
 use smithay::utils::Size;
 use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufGlobal};
 use smithay::wayland::presentation::Refresh;
+use smithay::wayland::selection::data_device::set_data_device_selection;
 
 use anland_sys::*;
 
@@ -127,6 +128,10 @@ pub struct Anland {
 
     last_buffer_idx: i32,
     debug_tint: bool,
+
+    // Clipboard text received from the Android consumer (anland INPUT_TYPE_CLIPBOARD),
+    // staged for the event loop to adopt as the Wayland selection.
+    pending_clipboard: Option<Vec<u8>>,
 }
 
 impl Anland {
@@ -161,6 +166,7 @@ impl Anland {
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             last_buffer_idx: -1,
             debug_tint: false,
+            pending_clipboard: None,
         })
     }
 
@@ -479,6 +485,17 @@ impl Anland {
             for event in events {
                 state.process_input_event(event);
             }
+            // Adopt clipboard text copied on Android as the Wayland selection so
+            // compositor-local clients can paste it. Safe to touch Wayland state here:
+            // we are on the main event loop.
+            if let Some(data) = state.backend.anland().take_pending_clipboard() {
+                set_data_device_selection(
+                    &state.niri.display_handle,
+                    &state.niri.seat,
+                    vec![String::from("text/plain")],
+                    Arc::from(data),
+                );
+            }
         }) {
             self.data_source_token = Some(token);
         }
@@ -487,6 +504,23 @@ impl Anland {
     // -------------------------------------------------------------------
     // Input dispatch
     // -------------------------------------------------------------------
+
+    /// Take the clipboard text staged by an INPUT_TYPE_CLIPBOARD event, if any.
+    /// The event loop adopts it as the Wayland selection after polling.
+    pub fn take_pending_clipboard(&mut self) -> Option<Vec<u8>> {
+        self.pending_clipboard.take()
+    }
+
+    /// Push a text clipboard update to the Android consumer.
+    pub fn push_clipboard(&self, text: &[u8]) {
+        let event = OutputEvent {
+            type_: OUTPUT_TYPE_CLIPBOARD,
+            clipboard: OutputClipboard {
+                size: text.len() as u32,
+            },
+        };
+        self.ctx.push_output_event_with_length(&event, text);
+    }
 
     /// Poll the daemon for queued input and return the translated smithay
     /// events. Non-input notifications (display refresh, clipboard) are
@@ -536,7 +570,9 @@ impl Anland {
                 if c.size > 0 {
                     let mut buf = vec![0u8; c.size as usize];
                     self.ctx.poll_input_event_extend_data(&mut buf, 1000);
-                    debug!("clipboard: {} bytes", c.size);
+                    // Adopt as the Wayland selection on the main event loop so
+                    // compositor-local clients can paste what was copied on Android.
+                    self.pending_clipboard = Some(buf);
                 }
                 true
             }

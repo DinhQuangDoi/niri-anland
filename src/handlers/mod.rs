@@ -4,7 +4,7 @@ mod layer_shell;
 mod xdg_shell;
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::thread;
@@ -19,6 +19,7 @@ use smithay::input::pointer::{CursorIcon, CursorImageStatus, Focus, PointerHandl
 use smithay::input::{keyboard, Seat, SeatHandler, SeatState};
 use smithay::output::Output;
 use smithay::reexports::rustix::fs::{fcntl_setfl, OFlags};
+use smithay::reexports::rustix::pipe::pipe as rustix_pipe;
 use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -53,7 +54,7 @@ use smithay::wayland::selection::primary_selection::{
 use smithay::wayland::selection::wlr_data_control::{
     DataControlHandler as WlrDataControlHandler, DataControlState as WlrDataControlState,
 };
-use smithay::wayland::selection::{SelectionHandler, SelectionTarget};
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::wayland::session_lock::{
     LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
 };
@@ -284,6 +285,57 @@ delegate_virtual_keyboard_manager!(State);
 
 impl SelectionHandler for State {
     type SelectionUserData = Arc<[u8]>;
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let _span = tracy_client::span!("new_selection");
+
+        // Only push clipboard (not primary selection) updates to Android.
+        if ty != SelectionTarget::Clipboard {
+            return;
+        }
+        let Some(source) = source else {
+            return;
+        };
+
+        let mime = String::from("text/plain");
+        if !source.contains_mime_type(&mime) {
+            return;
+        }
+
+        // Read the selection data over a pipe on a background thread, then hand
+        // the bytes to the main event loop to push through the anland backend.
+        let (tx, rx) = calloop::channel::sync_channel::<Vec<u8>>(1);
+        self.niri
+            .event_loop
+            .insert_source(rx, move |event, _, state| match event {
+                calloop::channel::Event::Msg(text) => {
+                    state.backend.anland().push_clipboard(&text);
+                }
+                calloop::channel::Event::Closed => (),
+            })
+            .unwrap();
+
+        let (read_fd, write_fd) = match rustix_pipe() {
+            Ok(fds) => fds,
+            Err(err) => {
+                warn!("error creating pipe for clipboard push: {err:?}");
+                return;
+            }
+        };
+        source.send(mime, write_fd.into());
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Err(err) = File::from(read_fd).read_to_end(&mut bytes) {
+                warn!("error reading clipboard selection: {err:?}");
+            }
+            let _ = tx.send(bytes);
+        });
+    }
 
     fn send_selection(
         &mut self,
