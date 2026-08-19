@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::mem;
 use std::os::fd::{BorrowedFd, OwnedFd};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -760,13 +760,20 @@ impl Anland {
             }
         };
 
-        if let Err(err) = res.sync.wait() {
-            warn!("error waiting for frame completion: {err:?}");
+        // Export a native fence so the consumer's queueBuffer makes
+        // SurfaceFlinger wait until the GPU is done writing the dmabuf. When
+        // the sync point has no exportable fence, block on it instead and fall
+        // back to "ready now" so we never scan out a buffer still being drawn.
+        let fence = res.sync.export().map(OwnedFd::into_raw_fd).unwrap_or(-1);
+        if fence < 0 {
+            if let Err(err) = res.sync.wait() {
+                warn!("error waiting for frame completion: {err:?}");
+            }
         }
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        self.ctx.set_render_fence(-1);
+        self.ctx.set_render_fence(fence);
         self.ctx.trigger_refresh();
 
         let mut presentation_feedbacks =
