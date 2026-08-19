@@ -13,6 +13,7 @@ use std::{env, mem, thread};
 use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecorationsMode;
 use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
+use crate::render_helpers::render_elements::AlwaysDamagedElement;
 use niri_config::debug::PreviewRender;
 use niri_config::{
     Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
@@ -3750,7 +3751,7 @@ impl Niri {
                     None,
                     Kind::Cursor,
                 ) {
-                    Ok(element) => push(element.into()),
+                    Ok(element) => push(AlwaysDamagedElement::new(element).into()),
                     Err(err) => {
                         warn!("error importing a cursor texture: {err:?}");
                     }
@@ -6504,7 +6505,7 @@ fn scale_relocate_crop<E: Element>(
 niri_render_elements! {
     PointerRenderElements<R> => {
         Wayland = WaylandSurfaceRenderElement<R>,
-        NamedPointer = MemoryRenderBufferRenderElement<R>,
+        NamedPointer = AlwaysDamagedElement<MemoryRenderBufferRenderElement<R>>,
     }
 }
 
