@@ -3681,11 +3681,13 @@ impl Niri {
     pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
         let _span = tracy_client::span!("Niri::redraw_queued_outputs");
 
+        // Only redraw outputs in Queued state. An output parked in
+        // WaitingForEstimatedVBlankAndQueued is waiting for its estimated-vblank
+        // timer; rendering it here would bypass the pacing and free-run the render
+        // loop at the consumer's buffer_ready rate instead of the panel refresh.
+        // The timer resolves it to Queued when it fires.
         while let Some((output, _)) = self.output_state.iter().find(|(_, state)| {
-            matches!(
-                state.redraw_state,
-                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
-            )
+            matches!(state.redraw_state, RedrawState::Queued)
         }) {
             trace!("redrawing output");
             let output = output.clone();
