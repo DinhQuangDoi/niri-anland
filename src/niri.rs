@@ -21,6 +21,7 @@ use niri_config::{
 };
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::Keycode;
+use smithay::wayland::tablet_manager::TabletSeatTrait;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
