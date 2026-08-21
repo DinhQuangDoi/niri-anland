@@ -37,6 +37,7 @@ pub union InputEventUnion {
     pub pointer_button: InputPointerButton,
     pub pointer_axis: InputPointerAxis,
     pub display: InputDisplay,
+    pub display_rotation: InputDisplayRotation,
     pub clipboard: InputClipboard,
     pub text_input: InputTextInput,
     pub input_action: InputAction,
@@ -88,6 +89,13 @@ pub struct InputPointerAxis {
 #[derive(Debug, Clone, Copy)]
 pub struct InputDisplay {
     pub refresh_mhz: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct InputDisplayRotation {
+    /// Current display rotation in degrees counter-clockwise (0/90/180/270).
+    pub angle_deg: u32,
 }
 
 #[repr(C)]
@@ -165,6 +173,7 @@ pub const INPUT_TYPE_TEXT_INPUT: u32 = 9;
 pub const INPUT_TYPE_ACTION: u32 = 10;
 pub const INPUT_TYPE_RESOURCE: u32 = 11;
 pub const INPUT_TYPE_RESOURCE_INVALID: u32 = 12;
+pub const INPUT_TYPE_DISPLAY_ROTATION: u32 = 13;
 
 // Output event type constants
 pub const OUTPUT_TYPE_CLIPBOARD: u32 = 1;

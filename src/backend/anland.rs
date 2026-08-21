@@ -147,6 +147,11 @@ pub struct Anland {
     // Clipboard text received from the Android consumer (anland INPUT_TYPE_CLIPBOARD),
     // staged for the event loop to adopt as the Wayland selection.
     pending_clipboard: Option<Vec<u8>>,
+
+    // Rotation angle in degrees CCW (0/90/180/270) received from the Android
+    // consumer (anland INPUT_TYPE_DISPLAY_ROTATION), staged for the event loop
+    // to apply as the anland output transform.
+    pending_rotation: Option<u32>,
 }
 
 impl Anland {
@@ -181,6 +186,7 @@ impl Anland {
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             debug_tint: false,
             pending_clipboard: None,
+            pending_rotation: None,
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
             frame_times: std::collections::VecDeque::new(),
@@ -527,6 +533,22 @@ impl Anland {
                     Arc::from(data),
                 );
             }
+            // Auto-rotate: the consumer reported the Android display rotation;
+            // mirror it onto the anland output through the same transient-config
+            // path `niri msg output anland transform <angle>` uses.
+            if let Some(angle_deg) = state.backend.anland().take_pending_rotation() {
+                let transform = match angle_deg {
+                    90 => niri_ipc::Transform::_90,
+                    180 => niri_ipc::Transform::_180,
+                    270 => niri_ipc::Transform::_270,
+                    _ => niri_ipc::Transform::Normal,
+                };
+                info!("applying anland display rotation {} deg", angle_deg);
+                state.apply_transient_output_config(
+                    "anland",
+                    niri_ipc::OutputAction::Transform { transform },
+                );
+            }
         }) {
             self.data_source_token = Some(token);
         }
@@ -540,6 +562,12 @@ impl Anland {
     /// The event loop adopts it as the Wayland selection after polling.
     pub fn take_pending_clipboard(&mut self) -> Option<Vec<u8>> {
         self.pending_clipboard.take()
+    }
+
+    /// Take the rotation angle staged by an INPUT_TYPE_DISPLAY_ROTATION event,
+    /// if any. The event loop applies it as the output transform after polling.
+    pub fn take_pending_rotation(&mut self) -> Option<u32> {
+        self.pending_rotation.take()
     }
 
     /// Push a text clipboard update to the Android consumer.
@@ -594,6 +622,12 @@ impl Anland {
             INPUT_TYPE_DISPLAY_REFRESH => {
                 let d = unsafe { u.display };
                 debug!("display refresh: {} mHz", d.refresh_mhz);
+                true
+            }
+            INPUT_TYPE_DISPLAY_ROTATION => {
+                let r = unsafe { u.display_rotation };
+                info!("display rotation: {} deg", r.angle_deg);
+                self.pending_rotation = Some(r.angle_deg);
                 true
             }
             INPUT_TYPE_CLIPBOARD => {
