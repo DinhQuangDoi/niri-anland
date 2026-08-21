@@ -543,10 +543,13 @@ impl Anland {
             // mirror it onto the anland output through the same transient-config
             // path `niri msg output anland transform <angle>` uses.
             if let Some(angle_deg) = state.backend.anland().take_pending_rotation() {
+                // Android reports the CONTENT rotation (ROTATION_90 = device
+                // turned clockwise); smithay transforms rotate the framebuffer,
+                // so the sense is inverted: swap 90 <-> 270.
                 let transform = match angle_deg {
-                    90 => niri_ipc::Transform::_90,
+                    90 => niri_ipc::Transform::_270,
                     180 => niri_ipc::Transform::_180,
-                    270 => niri_ipc::Transform::_270,
+                    270 => niri_ipc::Transform::_90,
                     _ => niri_ipc::Transform::Normal,
                 };
                 info!("applying anland display rotation {} deg", angle_deg);
