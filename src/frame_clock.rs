@@ -31,6 +31,21 @@ impl FrameClock {
             .map(|r| Duration::from_nanos(r.get()))
     }
 
+    /// Adopt a new refresh interval mid-session (e.g. the anland consumer
+    /// reporting its real panel rate after connecting with refresh=0).
+    pub fn set_refresh_interval(&mut self, refresh_interval: Option<Duration>) {
+        let refresh_interval_ns = if let Some(interval) = &refresh_interval {
+            assert_eq!(interval.as_secs(), 0);
+            Some(NonZeroU64::new(interval.subsec_nanos().into()).unwrap())
+        } else {
+            None
+        };
+
+        self.refresh_interval_ns = refresh_interval_ns;
+        // Re-anchor on the next presented() so the grid does not jump.
+        self.last_presentation_time = None;
+    }
+
     pub fn set_vrr(&mut self, vrr: bool) {
         if self.vrr == vrr {
             return;

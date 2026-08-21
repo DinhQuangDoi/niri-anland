@@ -152,6 +152,11 @@ pub struct Anland {
     // consumer (anland INPUT_TYPE_DISPLAY_ROTATION), staged for the event loop
     // to apply as the anland output transform.
     pending_rotation: Option<u32>,
+
+    // Refresh rate in mHz reported by the Android consumer
+    // (anland INPUT_TYPE_DISPLAY_REFRESH), staged for the event loop to adopt
+    // into the output mode and the frame clock pacing interval.
+    pending_refresh_mhz: Option<u32>,
 }
 
 impl Anland {
@@ -187,6 +192,7 @@ impl Anland {
             debug_tint: false,
             pending_clipboard: None,
             pending_rotation: None,
+            pending_refresh_mhz: None,
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
             frame_times: std::collections::VecDeque::new(),
@@ -549,6 +555,14 @@ impl Anland {
                     niri_ipc::OutputAction::Transform { transform },
                 );
             }
+            // The consumer reported its real refresh rate; adopt it so the
+            // frame clock paces to the actual panel grid.
+            if let Some(mhz) = state.backend.anland().take_pending_refresh_mhz() {
+                state
+                    .backend
+                    .anland()
+                    .apply_display_refresh(&mut state.niri, mhz);
+            }
         }) {
             self.data_source_token = Some(token);
         }
@@ -568,6 +582,12 @@ impl Anland {
     /// if any. The event loop applies it as the output transform after polling.
     pub fn take_pending_rotation(&mut self) -> Option<u32> {
         self.pending_rotation.take()
+    }
+
+    /// Take the refresh rate (mHz) staged by an INPUT_TYPE_DISPLAY_REFRESH
+    /// event, if any. The event loop adopts it after polling.
+    pub fn take_pending_refresh_mhz(&mut self) -> Option<u32> {
+        self.pending_refresh_mhz.take()
     }
 
     /// Push a text clipboard update to the Android consumer.
@@ -621,7 +641,8 @@ impl Anland {
         match event.type_ {
             INPUT_TYPE_DISPLAY_REFRESH => {
                 let d = unsafe { u.display };
-                debug!("display refresh: {} mHz", d.refresh_mhz);
+                info!("display refresh: {} mHz", d.refresh_mhz);
+                self.pending_refresh_mhz = Some(d.refresh_mhz);
                 true
             }
             INPUT_TYPE_DISPLAY_ROTATION => {
@@ -767,6 +788,48 @@ impl Anland {
                 event: AnlandTouchFrameEvent { time },
             }),
             _ => None,
+        }
+    }
+
+    /// Adopt a consumer-reported refresh rate (milli-Hz): update the frame
+    /// clock pacing interval and the output mode metadata. screen_info carries
+    /// refresh=0 on this daemon, so this is the only source of the real rate.
+    pub fn apply_display_refresh(&mut self, niri: &mut Niri, refresh_mhz: u32) {
+        let Some(output) = self.output.clone() else { return };
+        if refresh_mhz == 0 {
+            return;
+        }
+
+        // Pace animations/redraws to the real panel grid instead of the
+        // built-in fallback interval.
+        if let Some(state) = niri.output_state.get_mut(&output) {
+            state.frame_clock.set_refresh_interval(Some(
+                Duration::from_nanos(1_000_000_000_000u64 / refresh_mhz as u64),
+            ));
+            info!("frame clock paced to {} mHz", refresh_mhz);
+        }
+
+        // Mode metadata so clients and `niri msg outputs` see the true rate.
+        let (w, h) = match output.current_mode() {
+            Some(m) => (m.size.w, m.size.h),
+            None => (
+                self.ctx.screen_info().width as i32,
+                self.ctx.screen_info().height as i32,
+            ),
+        };
+        let mode = Mode {
+            size: Size::from((w, h)),
+            refresh: (refresh_mhz / 1000).max(1) as i32,
+        };
+        output.change_current_state(Some(mode), None, None, None);
+        output.set_preferred(mode);
+
+        let mut ipc = self.ipc_outputs.lock().unwrap();
+        if let Some(ipc_output) = ipc.values_mut().find(|o| o.name == output.name()) {
+            if let Some(m) = ipc_output.modes.first_mut() {
+                m.refresh_rate = refresh_mhz;
+            }
+            ipc_output.logical = Some(logical_output(&output));
         }
     }
 
