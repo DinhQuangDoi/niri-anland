@@ -231,6 +231,22 @@ extern "C" {
         timeout_ms: c_int,
     ) -> c_int;
     pub fn push_output_event(ctx: *mut display_ctx, event: *const OutputEvent) -> c_int;
+    pub fn try_push_cursor_bitmap(
+        ctx: *mut display_ctx,
+        w: u32,
+        h: u32,
+        hx: u32,
+        hy: u32,
+        pixels: *const u8,
+        pixel_len: u32,
+    ) -> c_int;
+    pub fn try_push_cursor_pos(
+        ctx: *mut display_ctx,
+        x: f32,
+        y: f32,
+        hx: u32,
+        hy: u32,
+    ) -> c_int;
     pub fn push_output_event_with_length(
         ctx: *mut display_ctx,
         event: *const OutputEvent,
@@ -462,6 +478,25 @@ impl AnlandContext {
         }
         payload.extend_from_slice(rgba);
         self.push_output_event_with_length(&event, &payload);
+    }
+
+    /// Non-blocking variants: return false when skipped because the socket
+    /// backlog was too high (caller keeps its last state and retries).
+    pub fn try_push_cursor_bitmap(
+        &mut self,
+        w: u32,
+        h: u32,
+        hx: u32,
+        hy: u32,
+        rgba: &[u8],
+    ) -> bool {
+        unsafe {
+            try_push_cursor_bitmap(self.ctx, w, h, hx, hy, rgba.as_ptr(), rgba.len() as u32) == 1
+        }
+    }
+
+    pub fn try_push_cursor_pos(&mut self, x: f32, y: f32, hx: u32, hy: u32) -> bool {
+        unsafe { try_push_cursor_pos(self.ctx, x, y, hx, hy) == 1 }
     }
 
     pub fn handle_unhandled_event(&self, event: &InputEvent) {

@@ -443,6 +443,98 @@ int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *ev
     free(msg);
     return 0;
 }
+
+/*
+ * Non-blocking cursor-plane send. The event loop calls this from inside its
+ * poll callback; a blocking write here would stall input processing for as
+ * long as the consumer keeps the socket queue full (observed as multi-second
+ * drag/hover freezes). Guard with SIOCOUTQ: only attempt the write when the
+ * sender backlog is small enough that the whole framed message fits without
+ * ever blocking or partially writing (a partial write would desync the
+ * stream). Returns 1 sent, 0 skipped (caller may retry later), -1 error.
+ */
+#include <sys/ioctl.h>
+#ifndef SIOCOUTQ
+#define SIOCOUTQ 0x894B
+#endif
+#define CURSOR_SEND_MAX_BACKLOG (32 * 1024)
+
+int try_push_cursor_bitmap(display_ctx *ctx,
+                           uint32_t w, uint32_t h, uint32_t hx, uint32_t hy,
+                           const uint8_t *pixels, uint32_t pixel_len)
+{
+    if (ctx->fallback)
+        return 0;
+
+    int outq = 0;
+    if (ioctl(ctx->data_fd, SIOCOUTQ, &outq) < 0)
+        outq = 0; /* ioctl unsupported: assume empty and proceed */
+    if (outq > CURSOR_SEND_MAX_BACKLOG)
+        return 0;
+
+    struct OutputEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = OUTPUT_TYPE_CURSOR_BITMAP;
+    ev.clipboard.size = pixel_len;
+
+    uint32_t header[4] = { w, h, hx, hy };
+
+    struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
+    size_t total = sizeof(hdr) + sizeof(ev) + sizeof(header) + pixel_len;
+    uint8_t *msg = (uint8_t *)malloc(total);
+    if (!msg)
+        return 0;
+    memcpy(msg, &hdr, sizeof(hdr));
+    memcpy(msg + sizeof(hdr), &ev, sizeof(ev));
+    memcpy(msg + sizeof(hdr) + sizeof(ev), header, sizeof(header));
+    if (pixel_len)
+        memcpy(msg + sizeof(hdr) + sizeof(ev) + sizeof(header), pixels, pixel_len);
+
+    /* Backlog guard above makes a full non-blocking write effectively
+     * certain; treat any short write as a hard failure and drop the frame
+     * rather than desyncing the stream. */
+    ssize_t n = send(ctx->data_fd, msg, total, MSG_DONTWAIT);
+    free(msg);
+    if (n < 0 || (size_t)n != total) {
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOBUFS)
+            enter_fallback(ctx);
+        return 0;
+    }
+    return 1;
+}
+
+int try_push_cursor_pos(display_ctx *ctx, float x, float y, uint32_t hx, uint32_t hy)
+{
+    if (ctx->fallback)
+        return 0;
+
+    int outq = 0;
+    if (ioctl(ctx->data_fd, SIOCOUTQ, &outq) < 0)
+        outq = 0;
+    if (outq > CURSOR_SEND_MAX_BACKLOG)
+        return 0;
+
+    struct OutputEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = OUTPUT_TYPE_CURSOR_POS;
+    ev.cursor_pos.x = x;
+    ev.cursor_pos.y = y;
+    ev.cursor_pos.hx = hx;
+    ev.cursor_pos.hy = hy;
+
+    struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
+    uint8_t msg[sizeof(hdr) + sizeof(ev)];
+    memcpy(msg, &hdr, sizeof(hdr));
+    memcpy(msg + sizeof(hdr), &ev, sizeof(ev));
+
+    ssize_t n = send(ctx->data_fd, msg, sizeof(msg), MSG_DONTWAIT);
+    if (n < 0 || (size_t)n != sizeof(msg)) {
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOBUFS)
+            enter_fallback(ctx);
+        return 0;
+    }
+    return 1;
+}
 int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms)
 {
     if (ctx->fallback)

@@ -110,6 +110,23 @@ impl EventSource for FdEventSource {
 // Anland Backend
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Cursor sprite helpers
+// ---------------------------------------------------------------------------
+
+fn key_of(w: u32, h: u32) -> (u32, i32, u32) {
+    (2u32, (w as i32).wrapping_mul(31) ^ h as i32, 0)
+}
+
+fn fnv1a(data: &[u8], w: u32, h: u32) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325 ^ ((w as u64) << 32) ^ h as u64;
+    for b in data {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 pub struct Anland {
     ctx: AnlandContext,
     _socket_path: String,
@@ -167,6 +184,12 @@ pub struct Anland {
     last_cursor_pos: Option<(i32, i32, i32, i32)>,
     // (icon as u32, scale, frame index) of the last sprite bitmap sent.
     last_cursor_key: Option<(u32, i32, u32)>,
+    // Pending bitmap that could not be sent because the data-socket backlog
+    // was too high; retried from the event-loop callback until accepted.
+    pending_cursor_bitmap: Option<(Vec<u8>, u32, u32, u32, u32)>,
+    // FNV-1a of the last successfully sent bitmap (with dims mixed in), so
+    // identical redefinitions (icon churn with same pixels) are skipped.
+    last_bitmap_hash: Option<u64>,
 }
 
 impl Anland {
@@ -206,6 +229,8 @@ impl Anland {
             cursor_caps: false,
             last_cursor_pos: None,
             last_cursor_key: None,
+            pending_cursor_bitmap: None,
+            last_bitmap_hash: None,
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
             frame_times: std::collections::VecDeque::new(),
@@ -383,6 +408,8 @@ impl Anland {
         self.cursor_caps = false;
         self.last_cursor_pos = None;
         self.last_cursor_key = None;
+        self.pending_cursor_bitmap = None;
+        self.last_bitmap_hash = None;
 
         // Dimensions of the buffers the consumer actually allocated this
         // session. They travel consumer->producer over the direct data
@@ -921,12 +948,17 @@ impl Anland {
         };
 
         // Phase 2 (mutable): apply the suppression flag and stream updates.
+        // All sends are non-blocking with retry-on-backlog: a slow consumer
+        // must never stall input processing (observed multi-second drag
+        // freezes when the blocking path filled the socket queue).
         match action {
             Sprite::Hide => {
                 niri.software_cursor_suppressed = true;
                 if self.last_cursor_key != Some((u32::MAX, 0, 0)) {
-                    self.ctx.push_cursor_bitmap(0, 0, 0, 0, &[]);
-                    self.last_cursor_key = Some((u32::MAX, 0, 0));
+                    if self.ctx.try_push_cursor_bitmap(0, 0, 0, 0, &[]) {
+                        self.last_cursor_key = Some((u32::MAX, 0, 0));
+                        self.last_bitmap_hash = None;
+                    }
                 }
             }
             Sprite::SoftwareFallback => {
@@ -934,25 +966,47 @@ impl Anland {
                 // the in-frame fallback for this status and hide the sprite.
                 niri.software_cursor_suppressed = false;
                 if self.last_cursor_key != Some((u32::MAX, 1, 0)) {
-                    self.ctx.push_cursor_bitmap(0, 0, 0, 0, &[]);
-                    self.last_cursor_key = Some((u32::MAX, 1, 0));
+                    if self.ctx.try_push_cursor_bitmap(0, 0, 0, 0, &[]) {
+                        self.last_cursor_key = Some((u32::MAX, 1, 0));
+                        self.last_bitmap_hash = None;
+                    }
                 }
             }
             Sprite::Bitmap(rgba, w, h, xhot, yhot) => {
                 niri.software_cursor_suppressed = true;
-                let key = (
-                    2u32,
-                    (w as i32).wrapping_mul(31) ^ h as i32,
-                    xhot.wrapping_mul(7) ^ yhot ^ ((rgba.len() as u32) << 8),
-                );
-                if !rgba.is_empty() && self.last_cursor_key != Some(key) {
-                    self.ctx.push_cursor_bitmap(w, h, xhot, yhot, &rgba);
-                    self.last_cursor_key = Some(key);
+                let hash = fnv1a(&rgba, w, h);
+                let content_changed = self.last_bitmap_hash != Some(hash);
+
+                // Retry a previously skipped bitmap first so the sprite never
+                // stays stale while newer content keeps arriving.
+                if let Some((pending, pw, ph, phx, phy)) = self.pending_cursor_bitmap.take() {
+                    if self.ctx.try_push_cursor_bitmap(pw, ph, phx, phy, &pending) {
+                        self.last_bitmap_hash = Some(fnv1a(&pending, pw, ph));
+                    } else {
+                        self.pending_cursor_bitmap = Some((pending, pw, ph, phx, phy));
+                    }
                 }
+
+                // Skip identical redefinitions (icon churn that renders the
+                // same pixels): the sprite on the consumer is already right.
+                if content_changed || self.last_bitmap_hash.is_none() {
+                    if self.ctx.try_push_cursor_bitmap(w, h, xhot, yhot, &rgba) {
+                        self.last_bitmap_hash = Some(hash);
+                        self.last_cursor_key = Some(key_of(w, h));
+                    } else {
+                        // Socket full: keep as pending and drop intermediate
+                        // positions this round (positions are absolute, the
+                        // consumer applies its last known one to the bitmap).
+                        self.pending_cursor_bitmap =
+                            Some((rgba.clone(), w, h, xhot, yhot));
+                    }
+                }
+
                 let hx = xhot as i32;
                 let hy = yhot as i32;
-                if self.last_cursor_pos != Some((px, py, hx, hy)) {
-                    self.ctx.push_cursor_pos(px as f32, py as f32, hx as u32, hy as u32);
+                if self.last_cursor_pos != Some((px, py, hx, hy))
+                    && self.ctx.try_push_cursor_pos(px as f32, py as f32, hx as u32, hy as u32)
+                {
                     self.last_cursor_pos = Some((px, py, hx, hy));
                 }
             }

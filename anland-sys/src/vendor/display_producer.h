@@ -51,6 +51,13 @@ int push_output_event(display_ctx *ctx, const struct OutputEvent *event);
 //变长事件不得使用push_output_event发送，必须使用push_output_event_with_length发送
 //接收端使用标准事件接收后根据size字段知道后续数据的大小，务必使用socket手动接收变长数据（必须有超时，避免对端挂掉）
 int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void* payload, size_t size);
+/* Non-blocking cursor-plane sends (SIOCOUTQ-guarded, MSG_DONTWAIT). Return 1
+ * when sent, 0 when skipped because the socket backlog was too high — the
+ * caller keeps its last state and retries on a later tick. */
+int try_push_cursor_bitmap(display_ctx *ctx,
+                           uint32_t w, uint32_t h, uint32_t hx, uint32_t hy,
+                           const uint8_t *pixels, uint32_t pixel_len);
+int try_push_cursor_pos(display_ctx *ctx, float x, float y, uint32_t hx, uint32_t hy);
 /* Register a callback invoked when the consumer is lost and the context drops
  * back to fallback. */
 int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
