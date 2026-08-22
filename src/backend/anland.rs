@@ -539,24 +539,15 @@ impl Anland {
                     Arc::from(data),
                 );
             }
-            // Auto-rotate: the consumer reported the Android display rotation;
-            // mirror it onto the anland output through the same transient-config
-            // path `niri msg output anland transform <angle>` uses.
+            // Auto-rotate: the consumer already reshapes its surface to the new
+            // orientation and reconnects with fresh dmabufs at the rotated
+            // dimensions, so the output mode follows the buffer automatically.
+            // Applying a smithay Transform here would rotate the desktop a
+            // SECOND time inside an already-rotated surface (double
+            // compensation) and shrink the visible area to a fraction of the
+            // screen. Log the event only; geometry comes from SCREEN_INFO.
             if let Some(angle_deg) = state.backend.anland().take_pending_rotation() {
-                // Android reports the CONTENT rotation (ROTATION_90 = device
-                // turned clockwise); smithay transforms rotate the framebuffer,
-                // so the sense is inverted: swap 90 <-> 270.
-                let transform = match angle_deg {
-                    90 => niri_ipc::Transform::_270,
-                    180 => niri_ipc::Transform::_180,
-                    270 => niri_ipc::Transform::_90,
-                    _ => niri_ipc::Transform::Normal,
-                };
-                info!("applying anland display rotation {} deg", angle_deg);
-                state.apply_transient_output_config(
-                    "anland",
-                    niri_ipc::OutputAction::Transform { transform },
-                );
+                info!("anland display rotation {} deg (geometry follows screen info)", angle_deg);
             }
             // The consumer reported its real refresh rate; adopt it so the
             // frame clock paces to the actual panel grid.
