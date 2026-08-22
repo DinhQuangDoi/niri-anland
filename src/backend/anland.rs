@@ -344,6 +344,14 @@ impl Anland {
         self.last_frame_per_buffer.clear();
         self.frame_count = 0;
 
+        // Dimensions of the buffers the consumer actually allocated this
+        // session. They travel consumer->producer over the direct data
+        // socketpair, so they are always fresh — unlike ctx.screen_info(),
+        // which some daemons only populate on the very first producer hello
+        // and then never update across orientation changes.
+        let mut dmabuf_w = 0u32;
+        let mut dmabuf_h = 0u32;
+
         for i in 0..count {
             let raw_fd = self.ctx.dmabuf_fd_at(i as i32);
             if raw_fd < 0 {
@@ -353,6 +361,10 @@ impl Anland {
                 Some(info) => info,
                 None => continue,
             };
+            if dmabuf_w == 0 {
+                dmabuf_w = info.width;
+                dmabuf_h = info.height;
+            }
             match self.import_raw_dmabuf(raw_fd, &info) {
                 Ok(dmabuf) => self.dmabufs.push(dmabuf),
                 Err(e) => warn!("failed to import dmabuf {}: {e:?}", i),
@@ -362,13 +374,16 @@ impl Anland {
         self.last_frame_per_buffer.resize(self.dmabufs.len(), -1);
 
         info!(
-            "connected to anland consumer: {} buffers, {}x{}",
+            "connected to anland consumer: {} buffers, {}x{} (screen info says {}x{})",
             self.dmabufs.len(),
+            dmabuf_w,
+            dmabuf_h,
             self.ctx.screen_info().width,
             self.ctx.screen_info().height,
         );
 
-        self.update_output_mode();
+        let dims = (dmabuf_w != 0).then_some((dmabuf_w as i32, dmabuf_h as i32));
+        self.update_output_mode_with(dims);
 
         self.register_buffer_ready_source(niri);
         self.register_input_source(niri);
@@ -380,11 +395,18 @@ impl Anland {
      * output mode with its real screen size.
      */
     fn update_output_mode(&mut self) {
-        let (w, h) = (
-            self.ctx.screen_info().width as i32,
-            self.ctx.screen_info().height as i32,
-        );
-        let refresh = self.ctx.screen_info().refresh as i32;
+        self.update_output_mode_with(None);
+    }
+
+    fn update_output_mode_with(&mut self, dims: Option<(i32, i32)>) {
+        // Prefer the freshly received dmabuf dimensions over the (possibly
+        // stale) daemon-cached screen info: they describe the buffers that
+        // will actually be presented this session.
+        let si = self.ctx.screen_info();
+        let refresh = si.refresh as i32;
+        let (w, h) = dims
+            .filter(|(w, h)| *w > 0 && *h > 0)
+            .unwrap_or((si.width as i32, si.height as i32));
 
         let Some(output) = self.output.clone() else { return };
 
