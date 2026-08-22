@@ -604,6 +604,15 @@ impl Anland {
     }
 
     fn screen_size(&self) -> (f64, f64) {
+        // Input coordinates arrive in consumer-surface pixel space, which is
+        // exactly the dmabuf/mode geometry we sized the output from. The
+        // daemon-cached screen info may be stale after an orientation change
+        // (some daemons only report it once), so prefer the live output mode.
+        if let Some(output) = &self.output {
+            if let Some(mode) = output.current_mode() {
+                return (mode.size.w as f64, mode.size.h as f64);
+            }
+        }
         let info = self.ctx.screen_info();
         (info.width as f64, info.height as f64)
     }
