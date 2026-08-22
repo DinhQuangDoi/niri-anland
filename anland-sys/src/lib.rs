@@ -42,6 +42,7 @@ pub union InputEventUnion {
     pub text_input: InputTextInput,
     pub input_action: InputAction,
     pub resource: InputResource,
+    pub input_caps: InputCaps,
     pub padding: [u32; 4],
 }
 
@@ -126,6 +127,13 @@ pub struct InputResource {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+pub struct InputCaps {
+    /// CONSUMER_CAP_* capability bitmask announced by the consumer.
+    pub caps: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct OutputEvent {
     pub type_: u32,
     pub clipboard: OutputClipboard,
@@ -137,6 +145,7 @@ pub union OutputEventUnion {
     pub clipboard: OutputClipboard,
     pub resources_request: OutputResourcesRequest,
     pub set_consumer_var: OutputSetConsumerVar,
+    pub cursor_pos: OutputCursorPos,
     pub padding: [u32; 4],
 }
 
@@ -160,6 +169,16 @@ pub struct OutputSetConsumerVar {
     pub value: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct OutputCursorPos {
+    /// Hotspot position in PHYSICAL buffer pixels.
+    pub x: f32,
+    pub y: f32,
+    pub hx: u32,
+    pub hy: u32,
+}
+
 // Input event type constants
 pub const INPUT_TYPE_TOUCH: u32 = 1;
 pub const INPUT_TYPE_KEY: u32 = 2;
@@ -174,11 +193,16 @@ pub const INPUT_TYPE_ACTION: u32 = 10;
 pub const INPUT_TYPE_RESOURCE: u32 = 11;
 pub const INPUT_TYPE_RESOURCE_INVALID: u32 = 12;
 pub const INPUT_TYPE_DISPLAY_ROTATION: u32 = 13;
+pub const INPUT_TYPE_CAPS: u32 = 14;
 
 // Output event type constants
 pub const OUTPUT_TYPE_CLIPBOARD: u32 = 1;
 pub const OUTPUT_TYPE_RESOURCES_REQUEST: u32 = 2;
 pub const OUTPUT_TYPE_SET_CONSUMER_VAR: u32 = 3;
+pub const OUTPUT_TYPE_CURSOR_POS: u32 = 4;
+pub const OUTPUT_TYPE_CURSOR_BITMAP: u32 = 5;
+
+pub const CONSUMER_CAP_CURSOR_PLANE: u32 = 1;
 
 // Consumer variable constants
 pub const CONSUMER_VAR_CAPTURE_MOUSE: u32 = 1;
@@ -399,6 +423,45 @@ impl AnlandContext {
             );
         }
         self.push_output_event(&event);
+    }
+
+    /// Move the consumer-side cursor sprite. (x, y) is the hotspot position in
+    /// physical buffer pixels; (hx, hy) is the sprite's hotspot offset so the
+    /// consumer can place the image at (x - hx, y - hy).
+    pub fn push_cursor_pos(&mut self, x: f32, y: f32, hx: u32, hy: u32) {
+        let mut event: OutputEvent = unsafe { std::mem::zeroed() };
+        event.type_ = OUTPUT_TYPE_CURSOR_POS;
+        unsafe {
+            let mut u: OutputEventUnion = std::mem::zeroed();
+            u.cursor_pos = OutputCursorPos { x, y, hx, hy };
+            std::ptr::copy_nonoverlapping(
+                &u as *const OutputEventUnion as *const u8,
+                &mut event.clipboard as *mut OutputClipboard as *mut u8,
+                std::mem::size_of::<OutputEventUnion>(),
+            );
+        }
+        self.push_output_event(&event);
+    }
+
+    /// (Re)define the cursor sprite image: a 16-byte header {w, h, hx, hy}
+    /// followed by w*h RGBA8888 bytes. A zero width hides the sprite.
+    pub fn push_cursor_bitmap(&mut self, w: u32, h: u32, hx: u32, hy: u32, rgba: &[u8]) {
+        debug_assert_eq!(rgba.len(), (w * h * 4) as usize);
+        let header: [u32; 4] = [w, h, hx, hy];
+        let event = OutputEvent {
+            type_: OUTPUT_TYPE_CURSOR_BITMAP,
+            clipboard: OutputClipboard {
+                size: rgba.len() as u32,
+            },
+        };
+        // The payload is the fixed header (little-endian u32s) followed by the
+        // pixel bytes.
+        let mut payload = Vec::with_capacity(std::mem::size_of_val(&header) + rgba.len());
+        for v in header {
+            payload.extend_from_slice(&v.to_ne_bytes());
+        }
+        payload.extend_from_slice(rgba);
+        self.push_output_event_with_length(&event, &payload);
     }
 
     pub fn handle_unhandled_event(&self, event: &InputEvent) {

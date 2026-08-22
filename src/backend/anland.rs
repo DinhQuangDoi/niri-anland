@@ -36,6 +36,7 @@ use super::anland_input::{
     AnlandTouchMotionEvent, AnlandTouchUpEvent, AnlandVirtualDevice,
 };
 use super::{IpcOutputMap, OutputId, RenderResult};
+use crate::cursor::RenderCursor;
 use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
@@ -157,6 +158,15 @@ pub struct Anland {
     // (anland INPUT_TYPE_DISPLAY_REFRESH), staged for the event loop to adopt
     // into the output mode and the frame clock pacing interval.
     pending_refresh_mhz: Option<u32>,
+
+    // Cursor-sprite ("cursor plane") support: the consumer announces
+    // CONSUMER_CAP_CURSOR_PLANE via INPUT_TYPE_CAPS after every connect; while
+    // set, the backend streams cursor position/bitmap output events instead of
+    // letting niri draw a software cursor into every frame.
+    cursor_caps: bool,
+    last_cursor_pos: Option<(i32, i32, i32, i32)>,
+    // (icon as u32, scale, frame index) of the last sprite bitmap sent.
+    last_cursor_key: Option<(u32, i32, u32)>,
 }
 
 impl Anland {
@@ -193,6 +203,9 @@ impl Anland {
             pending_clipboard: None,
             pending_rotation: None,
             pending_refresh_mhz: None,
+            cursor_caps: false,
+            last_cursor_pos: None,
+            last_cursor_key: None,
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
             frame_times: std::collections::VecDeque::new(),
@@ -363,6 +376,13 @@ impl Anland {
         self.dmabufs.clear();
         self.last_frame_per_buffer.clear();
         self.frame_count = 0;
+
+        // The consumer re-announces its capabilities after every reconnect;
+        // drop cached sprite state so position/bitmap are resent once the CAPS
+        // event arrives (and software cursor resumes until then).
+        self.cursor_caps = false;
+        self.last_cursor_pos = None;
+        self.last_cursor_key = None;
 
         // Dimensions of the buffers the consumer actually allocated this
         // session. They travel consumer->producer over the direct data
@@ -579,6 +599,12 @@ impl Anland {
                     .anland()
                     .apply_display_refresh(&mut state.niri, mhz);
             }
+            // Cursor sprite streaming: keep the consumer-side cursor plane in
+            // sync with the seat pointer and the current cursor image. Runs
+            // after every input batch so position updates ride the existing
+            // event cadence (~120Hz during motion) instead of requiring frame
+            // presents.
+            state.backend.anland().update_cursor_sprite(&mut state.niri);
         }) {
             self.data_source_token = Some(token);
         }
@@ -674,6 +700,19 @@ impl Anland {
                 let r = unsafe { u.display_rotation };
                 info!("display rotation: {} deg", r.angle_deg);
                 self.pending_rotation = Some(r.angle_deg);
+                true
+            }
+            INPUT_TYPE_CAPS => {
+                let c = unsafe { u.input_caps };
+                let supported = c.caps & anland_sys::CONSUMER_CAP_CURSOR_PLANE != 0;
+                if !self.cursor_caps && supported {
+                    info!("anland consumer supports the cursor sprite plane");
+                    // Force a bitmap + position resend now that the consumer
+                    // can display them.
+                    self.last_cursor_pos = None;
+                    self.last_cursor_key = None;
+                }
+                self.cursor_caps = supported;
                 true
             }
             INPUT_TYPE_CLIPBOARD => {
@@ -819,6 +858,107 @@ impl Anland {
     /// Adopt a consumer-reported refresh rate (milli-Hz): update the frame
     /// clock pacing interval and the output mode metadata. screen_info carries
     /// refresh=0 on this daemon, so this is the only source of the real rate.
+    /// Keep the consumer-side cursor sprite in sync with the seat pointer and
+    /// the active cursor image. Called from the event-loop callback after every
+    /// input batch: position updates therefore ride the input cadence (~120Hz
+    /// during motion) and never wait for a frame present, which is what makes
+    /// the sprite immune to the ghosting that plagues software cursors drawn
+    /// into frames.
+    pub fn update_cursor_sprite(&mut self, niri: &mut Niri) {
+        if !self.cursor_caps {
+            // Old consumer without sprite support: keep the in-frame cursor.
+            niri.software_cursor_suppressed = false;
+            return;
+        }
+
+        let Some(output) = self.output.clone() else {
+            return;
+        };
+        let scale_f = output.current_scale().fractional_scale() as f64;
+        let out_loc = niri
+            .global_space
+            .output_geometry(&output)
+            .map(|g| g.loc)
+            .unwrap_or((0, 0).into());
+        let pointer_logical = niri
+            .seat
+            .get_pointer()
+            .map(|handle| handle.current_location())
+            .unwrap_or_else(|| (0., 0.).into());
+        let local = pointer_logical - out_loc.to_f64();
+        let px = (local.x * scale_f).round() as i32;
+        let py = (local.y * scale_f).round() as i32;
+
+        // Phase 1 (immutable): decide what the sprite should look like.
+        // Named cursors copy their RGBA frame out so the borrow ends before we
+        // mutate the suppression flag; copies are small and rare (only on
+        // cursor-image or animation-frame changes).
+        enum Sprite {
+            Hide,
+            SoftwareFallback,
+            Bitmap(Vec<u8>, u32, u32, u32, u32),
+        }
+        let int_scale = output.current_scale().integer_scale();
+        let elapsed_ms = niri.start_time.elapsed().as_millis() as u32;
+        let action = match niri.cursor_manager.get_render_cursor(int_scale) {
+            RenderCursor::Hidden => Sprite::Hide,
+            RenderCursor::Surface { .. } => Sprite::SoftwareFallback,
+            RenderCursor::Named { icon, scale, cursor } => {
+                let (idx, frame) = cursor.frame(elapsed_ms);
+                let key = (icon as u32, scale, idx as u32);
+                if self.last_cursor_key == Some(key) {
+                    Sprite::Bitmap(Vec::new(), frame.width, frame.height, frame.xhot, frame.yhot)
+                } else {
+                    Sprite::Bitmap(
+                        frame.pixels_rgba.clone(),
+                        frame.width,
+                        frame.height,
+                        frame.xhot,
+                        frame.yhot,
+                    )
+                }
+            }
+        };
+
+        // Phase 2 (mutable): apply the suppression flag and stream updates.
+        match action {
+            Sprite::Hide => {
+                niri.software_cursor_suppressed = true;
+                if self.last_cursor_key != Some((u32::MAX, 0, 0)) {
+                    self.ctx.push_cursor_bitmap(0, 0, 0, 0, &[]);
+                    self.last_cursor_key = Some((u32::MAX, 0, 0));
+                }
+            }
+            Sprite::SoftwareFallback => {
+                // Client-provided cursor surface: pixels live on the GPU, keep
+                // the in-frame fallback for this status and hide the sprite.
+                niri.software_cursor_suppressed = false;
+                if self.last_cursor_key != Some((u32::MAX, 1, 0)) {
+                    self.ctx.push_cursor_bitmap(0, 0, 0, 0, &[]);
+                    self.last_cursor_key = Some((u32::MAX, 1, 0));
+                }
+            }
+            Sprite::Bitmap(rgba, w, h, xhot, yhot) => {
+                niri.software_cursor_suppressed = true;
+                let key = (
+                    2u32,
+                    (w as i32).wrapping_mul(31) ^ h as i32,
+                    xhot.wrapping_mul(7) ^ yhot ^ ((rgba.len() as u32) << 8),
+                );
+                if !rgba.is_empty() && self.last_cursor_key != Some(key) {
+                    self.ctx.push_cursor_bitmap(w, h, xhot, yhot, &rgba);
+                    self.last_cursor_key = Some(key);
+                }
+                let hx = xhot as i32;
+                let hy = yhot as i32;
+                if self.last_cursor_pos != Some((px, py, hx, hy)) {
+                    self.ctx.push_cursor_pos(px as f32, py as f32, hx as u32, hy as u32);
+                    self.last_cursor_pos = Some((px, py, hx, hy));
+                }
+            }
+        }
+    }
+
     pub fn apply_display_refresh(&mut self, niri: &mut Niri, refresh_mhz: u32) {
         let Some(output) = self.output.clone() else { return };
         if refresh_mhz == 0 {

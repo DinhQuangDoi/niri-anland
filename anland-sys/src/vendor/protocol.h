@@ -64,6 +64,17 @@ struct buf_info {
 #define INPUT_TYPE_ACTION 10
 #define INPUT_TYPE_RESOURCE 11
 #define INPUT_TYPE_RESOURCE_INVALID 12
+/* Consumer -> producer: the current Android display rotation (Display.getRotation()
+ * scaled to degrees CCW: 0/90/180/270). The compositor mirrors it onto its output
+ * transform so the desktop stays upright when the device rotates. Reuses the
+ * InputEvent framing like INPUT_TYPE_DISPLAY_REFRESH. */
+#define INPUT_TYPE_DISPLAY_ROTATION 13
+/* Consumer -> producer: capability bitmask announced once per connection (and
+ * re-sent after every fallback recovery). Bit 0 (CONSUMER_CAP_CURSOR_PLANE)
+ * means the consumer renders a separate cursor sprite layer, so the producer
+ * must stop drawing the cursor into the framebuffer and instead stream
+ * CURSOR_POS/CURSOR_BITMAP output events. */
+#define INPUT_TYPE_CAPS 14
 
 #define SERVICE_TYPE_CAMERA 1
 
@@ -82,6 +93,18 @@ struct buf_info {
  * The consumer regresses every var to 0 on its own fallback, so the producer
  * MUST resend the current value on each reconnect. */
 #define OUTPUT_TYPE_SET_CONSUMER_VAR 3
+
+/* Producer -> consumer: move the cursor sprite. Coordinates are PHYSICAL
+ * buffer pixels of the hotspot; the consumer places the sprite so its hotspot
+ * lands at (x - hx, y - hy). */
+#define OUTPUT_TYPE_CURSOR_POS   4
+/* Producer -> consumer: (re)define the cursor sprite image. Framed like
+ * clipboard: OutputEvent{size} followed by raw payload:
+ * { uint32 w, h, hx, hy } then w*h RGBA8888 bytes (row-major, origin top-left).
+ * A zero width hides the sprite (e.g. hidden cursor). */
+#define OUTPUT_TYPE_CURSOR_BITMAP 5
+
+#define CONSUMER_CAP_CURSOR_PLANE 1
 
 /* Var identifiers addressable via OUTPUT_TYPE_SET_CONSUMER_VAR. */
 /* 1 = force-enable Android pointer capture (Wayland zwp_locked_pointer_v1 active,
@@ -137,6 +160,9 @@ struct InputEvent {
             uint32_t fdnum;//fdnum是fd的数量,后续会有fdnum个fd跟随在这个结构体后面
         } resource;
         struct {
+            uint32_t caps; /* CONSUMER_CAP_* bitmask (INPUT_TYPE_CAPS) */
+        } input_caps;
+        struct {
             uint32_t padding[4];
         };
     };
@@ -156,6 +182,12 @@ struct OutputEvent{
             uint32_t var;   //CONSUMER_VAR_* identifier
             uint32_t value; //new UINT32 value (0 = default / release)
         } set_consumer_var;
+        struct {
+            float x;        /* hotspot position, physical buffer px */
+            float y;
+            uint32_t hx;    /* sprite hotspot offset */
+            uint32_t hy;
+        } cursor_pos;
         struct
         {
             uint32_t padding[4];

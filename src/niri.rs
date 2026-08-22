@@ -341,6 +341,12 @@ pub struct Niri {
     pub cursor_manager: CursorManager,
     pub cursor_texture_cache: CursorTextureCache,
     pub cursor_shape_manager_state: CursorShapeManagerState,
+    /// When set, the pointer is NOT drawn into the output frame: the display
+    /// backend streams cursor position/bitmap to a consumer-side sprite layer
+    /// instead (the anland Android pipeline has no KMS cursor plane, so the
+    /// sprite is recreated there). Client-set Surface cursors still render in
+    /// software as a fallback.
+    pub software_cursor_suppressed: bool,
     pub dnd_icon: Option<DndIcon>,
     /// Contents under pointer.
     ///
@@ -2582,6 +2588,7 @@ impl Niri {
             cursor_manager,
             cursor_texture_cache: Default::default(),
             cursor_shape_manager_state,
+            software_cursor_suppressed: false,
             dnd_icon: None,
             pointer_contents: PointContents::default(),
             pointer_visibility: PointerVisibility::Visible,
@@ -3702,6 +3709,19 @@ impl Niri {
         push: &mut dyn FnMut(PointerRenderElements<R>),
     ) {
         let _span = tracy_client::span!("Niri::render_pointer");
+        // When a cursor-sprite-capable consumer owns the pointer image, the
+        // compositor must not bake the cursor into the frame: the sprite is
+        // moved independently of frame presents (the whole point of the
+        // consumer-side "cursor plane"). Client-set Surface cursors still
+        // render in software because their pixels are GPU-side.
+        if self.software_cursor_suppressed
+            && !matches!(
+                self.cursor_manager.cursor_image(),
+                CursorImageStatus::Surface(_)
+            )
+        {
+            return;
+        }
         let output_scale = output.current_scale();
         let output_pos = self.global_space.output_geometry(output).unwrap().loc;
 
