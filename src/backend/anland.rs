@@ -1017,6 +1017,14 @@ impl Anland {
     }
 
     pub fn apply_display_refresh(&mut self, niri: &mut Niri, refresh_mhz: u32) {
+        // DEBUG A/B: the anchored frame clock is suspected of bursty
+        // presentation when composite cost exceeds the interval (GNOME-apps
+        // fps drops since .6). Gate it behind an env switch so a build can
+        // run with the old free-running fallback timer for comparison.
+        if std::env::var_os("ANLAND_ANCHOR_CLOCK").is_none_or(|v| v != "1") {
+            info!("display refresh {} mHz ignored (ANLAND_ANCHOR_CLOCK off)", refresh_mhz);
+            return;
+        }
         let Some(output) = self.output.clone() else { return };
         if refresh_mhz == 0 {
             return;
