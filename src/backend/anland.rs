@@ -1017,6 +1017,29 @@ impl Anland {
     }
 
     pub fn apply_display_refresh(&mut self, niri: &mut Niri, refresh_mhz: u32) {
+        // DEFAULT: free-running damage-driven rendering. With the cursor now
+        // living on the consumer-side sprite plane there is no always-damaged
+        // element driving runaway rates anymore — frames present exactly when
+        // clients produce damage, which measured smoother end-to-end than any
+        /// anchored variant.
+        //
+        // The anchored frame clock (pace to consumer-reported refresh via
+        // estimated-vblank timers) fights the other two pacers in this
+        // pipeline — SurfaceFlinger latching and the consumer's BufferQueue
+        // cycling. Empirically (A/B builds 77260b1 vs 4843743, 2026-08-23)
+        // every anchored configuration produced fps bursts/jank in GNOME
+        // apps while free-running stayed smooth.
+        //
+        // Set ANLAND_ANCHOR_CLOCK=1 to opt into the anchored clock (with
+        // phase-rejoin catch-up) for experiments.
+        if std::env::var_os("ANLAND_ANCHOR_CLOCK")
+            .is_some_and(|v| v == "1")
+        {
+            info!("display refresh {} mHz: anchored clock enabled", refresh_mhz);
+        } else {
+            info!("display refresh {} mHz reported (free-running mode)", refresh_mhz);
+            return;
+        }
         let Some(output) = self.output.clone() else { return };
         if refresh_mhz == 0 {
             return;
@@ -1261,10 +1284,25 @@ impl Anland {
         let now = get_monotonic_time();
         let mut duration = target_presentation_time.saturating_sub(now);
         if duration.is_zero() {
-            duration += output_state
+            // Missed this vblank slot. Parking a FULL interval from *now*
+            // (previous behaviour) turned every late present into a
+            // double-sized gap: late-by + interval. That surfaced as fps
+            // bursts/jank in GNOME apps whenever composite cost approached
+            // the refresh budget. Instead, rejoin the grid PHASE: aim for
+            // the next multiple of the interval counted from the missed
+            // target, so recovery lands within one interval and the cadence
+            // never accumulates debt.
+            let interval = output_state
                 .frame_clock
                 .refresh_interval()
                 .unwrap_or(Duration::from_micros(8_333));
+            let late = now.saturating_sub(target_presentation_time);
+            let late_n = late.as_nanos() as u64;
+            let interval_n = interval.as_nanos() as u64;
+            duration = Duration::from_nanos(match interval_n.checked_sub(late_n % interval_n) {
+                Some(d) if d > 0 => d,
+                _ => interval_n,
+            });
         }
 
         let timer = Timer::from_duration(duration);
