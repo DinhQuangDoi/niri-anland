@@ -1017,12 +1017,13 @@ impl Anland {
     }
 
     pub fn apply_display_refresh(&mut self, niri: &mut Niri, refresh_mhz: u32) {
-        // DEBUG A/B: the anchored frame clock is suspected of bursty
-        // presentation when composite cost exceeds the interval (GNOME-apps
-        // fps drops since .6). Gate it behind an env switch so a build can
-        // run with the old free-running fallback timer for comparison.
-        if std::env::var_os("ANLAND_ANCHOR_CLOCK").is_none_or(|v| v != "1") {
-            info!("display refresh {} mHz ignored (ANLAND_ANCHOR_CLOCK off)", refresh_mhz);
+        // Anchored frame clock with phase-rejoin catch-up (see
+        // queue_estimated_vblank_timer). Set ANLAND_ANCHOR_CLOCK=0 to fall
+        // back to the free-running timer for A/B comparisons.
+        if std::env::var_os("ANLAND_ANCHOR_CLOCK")
+            .is_some_and(|v| v == "0")
+        {
+            info!("display refresh {} mHz ignored (ANLAND_ANCHOR_CLOCK=0)", refresh_mhz);
             return;
         }
         let Some(output) = self.output.clone() else { return };
@@ -1269,10 +1270,25 @@ impl Anland {
         let now = get_monotonic_time();
         let mut duration = target_presentation_time.saturating_sub(now);
         if duration.is_zero() {
-            duration += output_state
+            // Missed this vblank slot. Parking a FULL interval from *now*
+            // (previous behaviour) turned every late present into a
+            // double-sized gap: late-by + interval. That surfaced as fps
+            // bursts/jank in GNOME apps whenever composite cost approached
+            // the refresh budget. Instead, rejoin the grid PHASE: aim for
+            // the next multiple of the interval counted from the missed
+            // target, so recovery lands within one interval and the cadence
+            // never accumulates debt.
+            let interval = output_state
                 .frame_clock
                 .refresh_interval()
                 .unwrap_or(Duration::from_micros(8_333));
+            let late = now.saturating_sub(target_presentation_time);
+            let late_n = late.as_nanos() as u64;
+            let interval_n = interval.as_nanos() as u64;
+            duration = Duration::from_nanos(match interval_n.checked_sub(late_n % interval_n) {
+                Some(d) if d > 0 => d,
+                _ => interval_n,
+            });
         }
 
         let timer = Timer::from_duration(duration);
