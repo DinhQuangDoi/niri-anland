@@ -1017,13 +1017,27 @@ impl Anland {
     }
 
     pub fn apply_display_refresh(&mut self, niri: &mut Niri, refresh_mhz: u32) {
-        // Anchored frame clock with phase-rejoin catch-up (see
-        // queue_estimated_vblank_timer). Set ANLAND_ANCHOR_CLOCK=0 to fall
-        // back to the free-running timer for A/B comparisons.
+        // DEFAULT: free-running damage-driven rendering. With the cursor now
+        // living on the consumer-side sprite plane there is no always-damaged
+        // element driving runaway rates anymore — frames present exactly when
+        // clients produce damage, which measured smoother end-to-end than any
+        /// anchored variant.
+        //
+        // The anchored frame clock (pace to consumer-reported refresh via
+        // estimated-vblank timers) fights the other two pacers in this
+        // pipeline — SurfaceFlinger latching and the consumer's BufferQueue
+        // cycling. Empirically (A/B builds 77260b1 vs 4843743, 2026-08-23)
+        // every anchored configuration produced fps bursts/jank in GNOME
+        // apps while free-running stayed smooth.
+        //
+        // Set ANLAND_ANCHOR_CLOCK=1 to opt into the anchored clock (with
+        // phase-rejoin catch-up) for experiments.
         if std::env::var_os("ANLAND_ANCHOR_CLOCK")
-            .is_some_and(|v| v == "0")
+            .is_some_and(|v| v == "1")
         {
-            info!("display refresh {} mHz ignored (ANLAND_ANCHOR_CLOCK=0)", refresh_mhz);
+            info!("display refresh {} mHz: anchored clock enabled", refresh_mhz);
+        } else {
+            info!("display refresh {} mHz reported (free-running mode)", refresh_mhz);
             return;
         }
         let Some(output) = self.output.clone() else { return };
