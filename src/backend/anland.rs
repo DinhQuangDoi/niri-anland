@@ -114,10 +114,6 @@ impl EventSource for FdEventSource {
 // Cursor sprite helpers
 // ---------------------------------------------------------------------------
 
-fn key_of(w: u32, h: u32) -> (u32, i32, u32) {
-    (2u32, (w as i32).wrapping_mul(31) ^ h as i32, 0)
-}
-
 fn fnv1a(data: &[u8], w: u32, h: u32) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325 ^ ((w as u64) << 32) ^ h as u64;
     for b in data {
@@ -182,8 +178,9 @@ pub struct Anland {
     // letting niri draw a software cursor into every frame.
     cursor_caps: bool,
     last_cursor_pos: Option<(i32, i32, i32, i32)>,
-    // (icon as u32, scale, frame index) of the last sprite bitmap sent.
-    last_cursor_key: Option<(u32, i32, u32)>,
+    // Set after successfully sending a hide-bitmap so the zero-size frame is
+    // only streamed once per Hidden/SoftwareFallback episode.
+    sprite_hidden_sent: bool,
     // Pending bitmap that could not be sent because the data-socket backlog
     // was too high; retried from the event-loop callback until accepted.
     pending_cursor_bitmap: Option<(Vec<u8>, u32, u32, u32, u32)>,
@@ -228,7 +225,7 @@ impl Anland {
             pending_refresh_mhz: None,
             cursor_caps: false,
             last_cursor_pos: None,
-            last_cursor_key: None,
+            sprite_hidden_sent: false,
             pending_cursor_bitmap: None,
             last_bitmap_hash: None,
             frame_count: 0,
@@ -407,7 +404,7 @@ impl Anland {
         // event arrives (and software cursor resumes until then).
         self.cursor_caps = false;
         self.last_cursor_pos = None;
-        self.last_cursor_key = None;
+        self.sprite_hidden_sent = false;
         self.pending_cursor_bitmap = None;
         self.last_bitmap_hash = None;
 
@@ -737,7 +734,8 @@ impl Anland {
                     // Force a bitmap + position resend now that the consumer
                     // can display them.
                     self.last_cursor_pos = None;
-                    self.last_cursor_key = None;
+                    self.last_bitmap_hash = None;
+                    self.sprite_hidden_sent = false;
                 }
                 self.cursor_caps = supported;
                 true
@@ -917,26 +915,33 @@ impl Anland {
         let py = (local.y * scale_f).round() as i32;
 
         // Phase 1 (immutable): decide what the sprite should look like.
-        // Named cursors copy their RGBA frame out so the borrow ends before we
-        // mutate the suppression flag; copies are small and rare (only on
-        // cursor-image or animation-frame changes).
+        // Hashing the frame inline (~9KB FNV) is cheap enough to run on every
+        // tick and lets us skip the pixel clone whenever the consumer already
+        // shows this exact image; clones then only happen on real changes.
         enum Sprite {
             Hide,
             SoftwareFallback,
-            Bitmap(Vec<u8>, u32, u32, u32, u32),
+            /// Consumer already displays this content — position-only update.
+            Unchanged { w: u32, h: u32, xhot: u32, yhot: u32 },
+            Changed(Vec<u8>, u32, u32, u32, u32),
         }
         let int_scale = output.current_scale().integer_scale();
         let elapsed_ms = niri.start_time.elapsed().as_millis() as u32;
         let action = match niri.cursor_manager.get_render_cursor(int_scale) {
             RenderCursor::Hidden => Sprite::Hide,
             RenderCursor::Surface { .. } => Sprite::SoftwareFallback,
-            RenderCursor::Named { icon, scale, cursor } => {
+            RenderCursor::Named { icon: _, scale: _, cursor } => {
                 let (idx, frame) = cursor.frame(elapsed_ms);
-                let key = (icon as u32, scale, idx as u32);
-                if self.last_cursor_key == Some(key) {
-                    Sprite::Bitmap(Vec::new(), frame.width, frame.height, frame.xhot, frame.yhot)
+                let hash = fnv1a(&frame.pixels_rgba, frame.width, frame.height);
+                if Some(hash) == self.last_bitmap_hash {
+                    Sprite::Unchanged {
+                        w: frame.width,
+                        h: frame.height,
+                        xhot: frame.xhot,
+                        yhot: frame.yhot,
+                    }
                 } else {
-                    Sprite::Bitmap(
+                    Sprite::Changed(
                         frame.pixels_rgba.clone(),
                         frame.width,
                         frame.height,
@@ -952,31 +957,27 @@ impl Anland {
         // must never stall input processing (observed multi-second drag
         // freezes when the blocking path filled the socket queue).
         match action {
-            Sprite::Hide => {
-                niri.software_cursor_suppressed = true;
-                if self.last_cursor_key != Some((u32::MAX, 0, 0)) {
-                    if self.ctx.try_push_cursor_bitmap(0, 0, 0, 0, &[]) {
-                        self.last_cursor_key = Some((u32::MAX, 0, 0));
-                        self.last_bitmap_hash = None;
-                    }
+            Sprite::Hide | Sprite::SoftwareFallback => {
+                let software_fallback = matches!(action, Sprite::SoftwareFallback);
+                niri.software_cursor_suppressed = software_fallback;
+                // A queued visible bitmap is superseded by the hide: drop it
+                // so a later retry cannot resurrect a stale cursor image.
+                self.pending_cursor_bitmap = None;
+                if !self.sprite_hidden_sent
+                    && self.ctx.try_push_cursor_bitmap(0, 0, 0, 0, &[])
+                {
+                    self.sprite_hidden_sent = true;
+                    self.last_bitmap_hash = None;
+                    self.last_cursor_pos = None;
                 }
             }
-            Sprite::SoftwareFallback => {
-                // Client-provided cursor surface: pixels live on the GPU, keep
-                // the in-frame fallback for this status and hide the sprite.
-                niri.software_cursor_suppressed = false;
-                if self.last_cursor_key != Some((u32::MAX, 1, 0)) {
-                    if self.ctx.try_push_cursor_bitmap(0, 0, 0, 0, &[]) {
-                        self.last_cursor_key = Some((u32::MAX, 1, 0));
-                        self.last_bitmap_hash = None;
-                    }
-                }
-            }
-            Sprite::Bitmap(rgba, w, h, xhot, yhot) => {
+            Sprite::Unchanged { w, h, xhot, yhot } => {
                 niri.software_cursor_suppressed = true;
-                let hash = fnv1a(&rgba, w, h);
-                let content_changed = self.last_bitmap_hash != Some(hash);
-
+                let _ = (w, h);
+                self.stream_cursor_position(xhot, yhot, px, py);
+            }
+            Sprite::Changed(rgba, w, h, xhot, yhot) => {
+                niri.software_cursor_suppressed = true;
                 // Retry a previously skipped bitmap first so the sprite never
                 // stays stale while newer content keeps arriving.
                 if let Some((pending, pw, ph, phx, phy)) = self.pending_cursor_bitmap.take() {
@@ -986,30 +987,32 @@ impl Anland {
                         self.pending_cursor_bitmap = Some((pending, pw, ph, phx, phy));
                     }
                 }
-
-                // Skip identical redefinitions (icon churn that renders the
-                // same pixels): the sprite on the consumer is already right.
-                if content_changed || self.last_bitmap_hash.is_none() {
-                    if self.ctx.try_push_cursor_bitmap(w, h, xhot, yhot, &rgba) {
-                        self.last_bitmap_hash = Some(hash);
-                        self.last_cursor_key = Some(key_of(w, h));
-                    } else {
-                        // Socket full: keep as pending and drop intermediate
-                        // positions this round (positions are absolute, the
-                        // consumer applies its last known one to the bitmap).
-                        self.pending_cursor_bitmap =
-                            Some((rgba.clone(), w, h, xhot, yhot));
-                    }
+                let hash = fnv1a(&rgba, w, h);
+                if self.ctx.try_push_cursor_bitmap(w, h, xhot, yhot, &rgba) {
+                    self.last_bitmap_hash = Some(hash);
+                    self.sprite_hidden_sent = false;
+                } else {
+                    // Socket full: keep as pending and drop intermediate
+                    // positions this round (positions are absolute, the
+                    // consumer applies its last known one to the bitmap).
+                    self.pending_cursor_bitmap = Some((rgba.clone(), w, h, xhot, yhot));
                 }
-
-                let hx = xhot as i32;
-                let hy = yhot as i32;
-                if self.last_cursor_pos != Some((px, py, hx, hy))
-                    && self.ctx.try_push_cursor_pos(px as f32, py as f32, hx as u32, hy as u32)
-                {
-                    self.last_cursor_pos = Some((px, py, hx, hy));
-                }
+                self.stream_cursor_position(xhot, yhot, px, py);
             }
+        }
+    }
+
+    /// Send CURSOR_POS for the current pointer location. The hotspot comes
+    /// from the sprite currently displayed, so an unchanged bitmap still
+    /// re-anchors correctly. Skips when nothing moved or the socket backlog
+    /// is high (the next tick retries with fresh coordinates).
+    fn stream_cursor_position(&mut self, xhot: u32, yhot: u32, px: i32, py: i32) {
+        let hx = xhot as i32;
+        let hy = yhot as i32;
+        if self.last_cursor_pos != Some((px, py, hx, hy))
+            && self.ctx.try_push_cursor_pos(px as f32, py as f32, hx as u32, hy as u32)
+        {
+            self.last_cursor_pos = Some((px, py, hx, hy));
         }
     }
 
