@@ -43,4 +43,5 @@ jobs:
         with:
           name: niri-aarch64
           path: target/release/niri
+          retention-days: 7
           if-no-files-found: error
