@@ -461,6 +461,16 @@ impl<W: LayoutElement> Tile<W> {
         let animated_tile_size = self.animated_tile_size();
         let expanded_progress = self.expanded_progress();
 
+        // If the user clips the window to geometry with an explicit corner radius, they are going
+        // for consistent rounded corners, so keep the radius in the maximized state too.
+        let keep_corner_radius =
+            rules.clip_to_geometry == Some(true) && rules.geometry_corner_radius.is_some();
+        let corner_radius_scale = if keep_corner_radius {
+            1.
+        } else {
+            1. - expanded_progress as f32
+        };
+
         let draw_border_with_background = rules
             .draw_border_with_background
             .unwrap_or_else(|| !self.window.has_ssd());
@@ -489,7 +499,7 @@ impl<W: LayoutElement> Tile<W> {
             .window
             .geometry_corner_radius()
             .expanded_by(border_width as f32)
-            .scaled_by(1. - expanded_progress as f32);
+            .scaled_by(corner_radius_scale);
         self.border.update_render_elements(
             border_window_size,
             is_active,
@@ -509,7 +519,7 @@ impl<W: LayoutElement> Tile<W> {
         } else {
             self.window
                 .geometry_corner_radius()
-                .scaled_by(1. - expanded_progress as f32)
+                .scaled_by(corner_radius_scale)
         };
         self.shadow.update_render_elements(
             animated_tile_size,
@@ -1069,10 +1079,16 @@ impl<W: LayoutElement> Tile<W> {
         // Clip to geometry including during the fullscreen animation to help with buggy clients
         // that submit a full-sized buffer before acking the fullscreen state (Firefox).
         let clip_to_geometry = fullscreen_progress < 1. && rules.clip_to_geometry == Some(true);
-        let radius = self
-            .window
-            .geometry_corner_radius()
-            .scaled_by(1. - expanded_progress as f32);
+        // Keep the user's corner radius in the maximized state when they clip to geometry.
+        let keep_corner_radius =
+            rules.clip_to_geometry == Some(true) && rules.geometry_corner_radius.is_some();
+        let radius = self.window.geometry_corner_radius().scaled_by(
+            if keep_corner_radius {
+                1.
+            } else {
+                1. - expanded_progress as f32
+            },
+        );
 
         // Popups go on top, whether it's resize or not.
         self.window.render_popups(
