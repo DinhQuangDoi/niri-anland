@@ -402,6 +402,18 @@ impl AnlandContext {
     }
 
     pub fn handle_unhandled_event(&self, event: &InputEvent) {
+        if event.type_ == INPUT_TYPE_TEXT_INPUT {
+            let u = unsafe {
+                let mut u: InputEventUnion = std::mem::zeroed();
+                std::ptr::copy_nonoverlapping(&event.touch as *const _ as *const u8, &mut u as *mut _ as *mut u8, std::mem::size_of::<InputEventUnion>());
+                u
+            };
+            let size = unsafe { u.text_input.size as usize };
+            if size > 0 {
+                let mut buf = vec![0u8; size];
+                self.poll_input_event_extend_data(&mut buf, 1000);
+            }
+        }
         if event.type_ == INPUT_TYPE_CLIPBOARD {
             let u = unsafe {
                 let u: InputEventUnion = std::mem::zeroed();
