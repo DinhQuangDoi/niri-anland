@@ -597,7 +597,51 @@ impl Anland {
             }
             match self.to_smithay_event(&event) {
                 Some(smithay_event) => out.push(smithay_event),
-                None => self.ctx.handle_unhandled_event(&event),
+                
+                None => {
+                    if event.type_ == anland_sys::INPUT_TYPE_TEXT_INPUT {
+                        let u = unsafe {
+                            let mut u: anland_sys::InputEventUnion = std::mem::zeroed();
+                            std::ptr::copy_nonoverlapping(
+                                &event.touch as *const _ as *const u8,
+                                &mut u as *mut _ as *mut u8,
+                                std::mem::size_of::<anland_sys::InputEventUnion>(),
+                            );
+                            u
+                        };
+                        let size = unsafe { u.text_input.size as usize };
+                        if size > 0 {
+                            let mut buf = vec![0u8; size];
+                            self.ctx.poll_input_event_extend_data(&mut buf, 1000);
+                            if let Ok(text) = String::from_utf8(buf) {
+                                let time = crate::utils::get_monotonic_time().as_millis() as u64;
+                                for c in text.chars() {
+                                    if let Some((keycode, shift)) = char_to_keycode(c) {
+                                        if shift {
+                                            out.push(SmithayInputEvent::Keyboard {
+                                                event: AnlandKeyboardEvent { time, key_code: 42, state: smithay::backend::input::KeyState::Pressed },
+                                            });
+                                        }
+                                        out.push(SmithayInputEvent::Keyboard {
+                                            event: AnlandKeyboardEvent { time, key_code: keycode, state: smithay::backend::input::KeyState::Pressed },
+                                        });
+                                        out.push(SmithayInputEvent::Keyboard {
+                                            event: AnlandKeyboardEvent { time, key_code: keycode, state: smithay::backend::input::KeyState::Released },
+                                        });
+                                        if shift {
+                                            out.push(SmithayInputEvent::Keyboard {
+                                                event: AnlandKeyboardEvent { time, key_code: 42, state: smithay::backend::input::KeyState::Released },
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        self.ctx.handle_unhandled_event(&event);
+                    }
+                }
+
             }
         }
         out
@@ -965,5 +1009,36 @@ fn protocol_format_to_fourcc(format: u32) -> Fourcc {
         0x32335241 | 0x41425233 | 0x09 | 0x03 => Fourcc::Abgr8888,
         0x32335258 | 0x58425233 | 0x0d | 0x04 => Fourcc::Xbgr8888,
         _ => Fourcc::Argb8888,
+    }
+}
+
+
+fn char_to_keycode(c: char) -> Option<(u32, bool)> {
+    match c {
+        '`' => Some((41, false)), '1' => Some((2, false)), '2' => Some((3, false)), '3' => Some((4, false)),
+        '4' => Some((5, false)), '5' => Some((6, false)), '6' => Some((7, false)), '7' => Some((8, false)),
+        '8' => Some((9, false)), '9' => Some((10, false)), '0' => Some((11, false)), '-' => Some((12, false)),
+        '=' => Some((13, false)), 'q' => Some((16, false)), 'w' => Some((17, false)), 'e' => Some((18, false)),
+        'r' => Some((19, false)), 't' => Some((20, false)), 'y' => Some((21, false)), 'u' => Some((22, false)),
+        'i' => Some((23, false)), 'o' => Some((24, false)), 'p' => Some((25, false)), '[' => Some((26, false)),
+        ']' => Some((27, false)), '\\' => Some((43, false)), 'a' => Some((30, false)), 's' => Some((31, false)),
+        'd' => Some((32, false)), 'f' => Some((33, false)), 'g' => Some((34, false)), 'h' => Some((35, false)),
+        'j' => Some((36, false)), 'k' => Some((37, false)), 'l' => Some((38, false)), ';' => Some((39, false)),
+        '\'' => Some((40, false)), 'z' => Some((44, false)), 'x' => Some((45, false)), 'c' => Some((46, false)),
+        'v' => Some((47, false)), 'b' => Some((48, false)), 'n' => Some((49, false)), 'm' => Some((50, false)),
+        ',' => Some((51, false)), '.' => Some((52, false)), '/' => Some((53, false)), ' ' => Some((57, false)),
+        '~' => Some((41, true)), '!' => Some((2, true)), '@' => Some((3, true)), '#' => Some((4, true)),
+        '$' => Some((5, true)), '%' => Some((6, true)), '^' => Some((7, true)), '&' => Some((8, true)),
+        '*' => Some((9, true)), '(' => Some((10, true)), ')' => Some((11, true)), '_' => Some((12, true)),
+        '+' => Some((13, true)), 'Q' => Some((16, true)), 'W' => Some((17, true)), 'E' => Some((18, true)),
+        'R' => Some((19, true)), 'T' => Some((20, true)), 'Y' => Some((21, true)), 'U' => Some((22, true)),
+        'I' => Some((23, true)), 'O' => Some((24, true)), 'P' => Some((25, true)), '{' => Some((26, true)),
+        '}' => Some((27, true)), '|' => Some((43, true)), 'A' => Some((30, true)), 'S' => Some((31, true)),
+        'D' => Some((32, true)), 'F' => Some((33, true)), 'G' => Some((34, true)), 'H' => Some((35, true)),
+        'J' => Some((36, true)), 'K' => Some((37, true)), 'L' => Some((38, true)), ':' => Some((39, true)),
+        '"' => Some((40, true)), 'Z' => Some((44, true)), 'X' => Some((45, true)), 'C' => Some((46, true)),
+        'V' => Some((47, true)), 'B' => Some((48, true)), 'N' => Some((49, true)), 'M' => Some((50, true)),
+        '<' => Some((51, true)), '>' => Some((52, true)), '?' => Some((53, true)),
+        _ => None,
     }
 }
