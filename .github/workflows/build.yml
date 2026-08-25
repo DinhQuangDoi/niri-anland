@@ -1,0 +1,47 @@
+name: build
+
+on:
+  push:
+    branches:
+      - anland
+    tags:
+      - '*-anland.*'
+  workflow_dispatch:
+
+env:
+  DEPS_APT: curl gcc clang pkg-config libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libpipewire-0.3-dev libpango1.0-dev libdisplay-info-dev
+
+jobs:
+  build:
+    name: build niri (aarch64)
+    runs-on: ubuntu-26.04-arm
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          show-progress: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ${{ env.DEPS_APT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Show binary
+        run: |
+          file target/release/niri
+          ls -lh target/release/niri
+          ldd target/release/niri
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: niri-aarch64
+          path: target/release/niri
+          retention-days: 7
+          if-no-files-found: error
