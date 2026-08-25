@@ -1,3 +1,95 @@
+use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
+use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
+use smithay::utils::{Buffer, Physical, Rectangle, Scale, Transform};
+
+#[derive(Debug)]
+pub struct AlwaysDamagedElement<E>(E);
+
+impl<E> AlwaysDamagedElement<E> {
+    pub fn new(elem: E) -> Self {
+        AlwaysDamagedElement(elem)
+    }
+}
+
+impl<E: Element> Element for AlwaysDamagedElement<E> {
+    fn id(&self) -> &Id {
+        self.0.id()
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.0.current_commit()
+    }
+
+    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.0.geometry(scale)
+    }
+
+    fn transform(&self) -> Transform {
+        self.0.transform()
+    }
+
+    fn src(&self) -> Rectangle<f64, Buffer> {
+        self.0.src()
+    }
+
+    fn damage_since(
+        &self,
+        scale: Scale<f64>,
+        _commit: Option<CommitCounter>,
+    ) -> DamageSet<i32, Physical> {
+        let size = self.0.geometry(scale).size;
+        DamageSet::from_slice(&[Rectangle::from_size(size)])
+    }
+
+    fn opaque_regions(&self, scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        self.0.opaque_regions(scale)
+    }
+
+    fn alpha(&self) -> f32 {
+        self.0.alpha()
+    }
+
+    fn kind(&self) -> Kind {
+        self.0.kind()
+    }
+
+    fn is_framebuffer_effect(&self) -> bool {
+        self.0.is_framebuffer_effect()
+    }
+}
+
+impl<E, R> RenderElement<R> for AlwaysDamagedElement<E>
+where
+    E: RenderElement<R>,
+    R: smithay::backend::renderer::Renderer,
+{
+    fn draw(
+        &self,
+        frame: &mut R::Frame<'_, '_>,
+        src: Rectangle<f64, Buffer>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        cache: Option<&smithay::utils::user_data::UserDataMap>,
+    ) -> Result<(), R::Error> {
+        RenderElement::<R>::draw(&self.0, frame, src, dst, damage, opaque_regions, cache)
+    }
+
+    fn capture_framebuffer(
+        &self,
+        frame: &mut R::Frame<'_, '_>,
+        src: Rectangle<f64, Buffer>,
+        dst: Rectangle<i32, Physical>,
+        cache: &smithay::utils::user_data::UserDataMap,
+    ) -> Result<(), R::Error> {
+        RenderElement::<R>::capture_framebuffer(&self.0, frame, src, dst, cache)
+    }
+
+    fn underlying_storage(&self, renderer: &mut R) -> Option<UnderlyingStorage<'_>> {
+        self.0.underlying_storage(renderer)
+    }
+}
+
 // We need to implement RenderElement manually due to AsGlesFrame requirement.
 // This macro does it for us.
 #[macro_export]

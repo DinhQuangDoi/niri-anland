@@ -70,6 +70,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
+    if cli.anland {
+        // Force the anland backend regardless of DISPLAY/WAYLAND_DISPLAY.
+        env::remove_var("DISPLAY");
+        env::remove_var("WAYLAND_DISPLAY");
+        env::remove_var("WAYLAND_SOCKET");
+        if env::var_os("ANLAND_SOCKET").is_none() {
+            env::set_var("ANLAND_SOCKET", "/run/display.sock");
+        }
+    }
+
     if cli.session {
         // If we're starting as a session, assume that the intention is to start on a TTY unless
         // this is a WSL environment. Remove DISPLAY, WAYLAND_DISPLAY or WAYLAND_SOCKET from our

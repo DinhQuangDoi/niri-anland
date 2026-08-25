@@ -13,6 +13,7 @@ use std::{env, mem, thread};
 use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecorationsMode;
 use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
+use crate::render_helpers::render_elements::AlwaysDamagedElement;
 use niri_config::debug::PreviewRender;
 use niri_config::{
     Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
@@ -116,7 +117,7 @@ use wayland_server::protocol::wl_output::WlOutput;
 use crate::a11y::A11y;
 use crate::animation::Clock;
 use crate::backend::tty::SurfaceDmabufFeedback;
-use crate::backend::{Backend, Headless, RenderResult, Tty, Winit};
+use crate::backend::{Anland, Backend, Headless, RenderResult, Tty, Winit};
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_locale1::Locale1ToNiri;
@@ -715,10 +716,19 @@ impl State {
         let has_display = env::var_os("WAYLAND_DISPLAY").is_some()
             || env::var_os("WAYLAND_SOCKET").is_some()
             || env::var_os("DISPLAY").is_some();
+        let has_anland =
+            env::var_os("ANLAND_SOCKET").is_some() || env::var_os("ANLAND_SOCKET_PATH").is_some();
 
         let mut backend = if headless {
             let headless = Headless::new();
             Backend::Headless(headless)
+        } else if has_anland {
+            let socket = env::var("ANLAND_SOCKET")
+                .or_else(|_| env::var("ANLAND_SOCKET_PATH"))
+                .unwrap_or_else(|_| "/run/display.sock".into());
+            let anland =
+                Anland::new(socket).context("error initializing anland backend")?;
+            Backend::Anland(anland)
         } else if has_display {
             let winit = Winit::new(config.clone(), event_loop.clone())?;
             Backend::Winit(winit)
@@ -3741,7 +3751,7 @@ impl Niri {
                     None,
                     Kind::Cursor,
                 ) {
-                    Ok(element) => push(element.into()),
+                    Ok(element) => push(AlwaysDamagedElement::new(element).into()),
                     Err(err) => {
                         warn!("error importing a cursor texture: {err:?}");
                     }
@@ -6495,7 +6505,7 @@ fn scale_relocate_crop<E: Element>(
 niri_render_elements! {
     PointerRenderElements<R> => {
         Wayland = WaylandSurfaceRenderElement<R>,
-        NamedPointer = MemoryRenderBufferRenderElement<R>,
+        NamedPointer = AlwaysDamagedElement<MemoryRenderBufferRenderElement<R>>,
     }
 }
 

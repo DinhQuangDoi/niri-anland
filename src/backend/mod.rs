@@ -20,11 +20,16 @@ pub use winit::Winit;
 pub mod headless;
 pub use headless::Headless;
 
+pub mod anland;
+pub mod anland_input;
+pub use anland::Anland;
+
 #[allow(clippy::large_enum_variant)]
 pub enum Backend {
     Tty(Tty),
     Winit(Winit),
     Headless(Headless),
+    Anland(Anland),
 }
 
 #[derive(PartialEq, Eq)]
@@ -61,6 +66,7 @@ impl Backend {
             Backend::Tty(tty) => tty.init(niri),
             Backend::Winit(winit) => winit.init(niri),
             Backend::Headless(headless) => headless.init(niri),
+            Backend::Anland(anland) => anland.init(niri),
         }
     }
 
@@ -69,6 +75,7 @@ impl Backend {
             Backend::Tty(tty) => tty.seat_name(),
             Backend::Winit(winit) => winit.seat_name(),
             Backend::Headless(headless) => headless.seat_name(),
+            Backend::Anland(anland) => anland.seat_name(),
         }
     }
 
@@ -80,6 +87,7 @@ impl Backend {
             Backend::Tty(tty) => tty.with_primary_renderer(f),
             Backend::Winit(winit) => winit.with_primary_renderer(f),
             Backend::Headless(headless) => headless.with_primary_renderer(f),
+            Backend::Anland(anland) => anland.with_primary_renderer(f),
         }
     }
 
@@ -93,6 +101,7 @@ impl Backend {
             Backend::Tty(tty) => tty.render(niri, output, target_presentation_time),
             Backend::Winit(winit) => winit.render(niri, output),
             Backend::Headless(headless) => headless.render(niri, output),
+            Backend::Anland(anland) => anland.render(niri, output, target_presentation_time),
         }
     }
 
@@ -105,7 +114,7 @@ impl Backend {
                     ModKey::Alt
                 }
             }),
-            Backend::Tty(_) | Backend::Headless(_) => config.input.mod_key.unwrap_or(ModKey::Super),
+            Backend::Tty(_) | Backend::Headless(_) | Backend::Anland(_) => config.input.mod_key.unwrap_or(ModKey::Super),
         }
     }
 
@@ -114,6 +123,7 @@ impl Backend {
             Backend::Tty(tty) => tty.change_vt(vt),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
+            Backend::Anland(_) => (),
         }
     }
 
@@ -122,6 +132,7 @@ impl Backend {
             Backend::Tty(tty) => tty.suspend(),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
+            Backend::Anland(_) => (),
         }
     }
 
@@ -130,6 +141,7 @@ impl Backend {
             Backend::Tty(tty) => tty.toggle_debug_tint(),
             Backend::Winit(winit) => winit.toggle_debug_tint(),
             Backend::Headless(_) => (),
+            Backend::Anland(anland) => anland.toggle_debug_tint(),
         }
     }
 
@@ -138,6 +150,7 @@ impl Backend {
             Backend::Tty(tty) => tty.import_dmabuf(dmabuf),
             Backend::Winit(winit) => winit.import_dmabuf(dmabuf),
             Backend::Headless(headless) => headless.import_dmabuf(dmabuf),
+            Backend::Anland(anland) => anland.import_dmabuf(dmabuf),
         }
     }
 
@@ -146,6 +159,7 @@ impl Backend {
             Backend::Tty(tty) => tty.early_import(surface),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
+            Backend::Anland(_) => (),
         }
     }
 
@@ -154,6 +168,7 @@ impl Backend {
             Backend::Tty(tty) => tty.ipc_outputs(),
             Backend::Winit(winit) => winit.ipc_outputs(),
             Backend::Headless(headless) => headless.ipc_outputs(),
+            Backend::Anland(anland) => anland.ipc_outputs(),
         }
     }
 
@@ -166,6 +181,7 @@ impl Backend {
             Backend::Tty(tty) => tty.primary_gbm_device(),
             Backend::Winit(_) => None,
             Backend::Headless(_) => None,
+            Backend::Anland(_) => None,
         }
     }
 
@@ -174,6 +190,7 @@ impl Backend {
             Backend::Tty(tty) => tty.set_monitors_active(active),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
+            Backend::Anland(_) => (),
         }
     }
 
@@ -182,6 +199,7 @@ impl Backend {
             Backend::Tty(tty) => tty.set_output_on_demand_vrr(niri, output, enable_vrr),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
+            Backend::Anland(_) => (),
         }
     }
 
@@ -190,6 +208,7 @@ impl Backend {
             Backend::Tty(tty) => tty.update_ignored_nodes_config(niri),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
+            Backend::Anland(_) => (),
         }
     }
 
@@ -198,6 +217,7 @@ impl Backend {
             Backend::Tty(tty) => tty.on_output_config_changed(niri),
             Backend::Winit(_) => (),
             Backend::Headless(_) => (),
+            Backend::Anland(_) => (),
         }
     }
 
@@ -230,6 +250,14 @@ impl Backend {
             v
         } else {
             panic!("backend is not Headless")
+        }
+    }
+
+    pub fn anland(&mut self) -> &mut Anland {
+        if let Self::Anland(v) = self {
+            v
+        } else {
+            panic!("backend is not Anland")
         }
     }
 }
