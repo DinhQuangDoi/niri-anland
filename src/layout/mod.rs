@@ -310,10 +310,17 @@ pub trait LayoutElement {
     /// are handled externally by the Tile, so the corner radius changes for those modes is also
     /// handled externally.
     fn geometry_corner_radius(&self) -> CornerRadius {
-        if self.is_windowed_fullscreen() {
+        let rules = self.rules();
+
+        // When windows think they're fullscreen, they square their corners.
+        //
+        // However, if the user is clipping the window to geometry, they are likely going for
+        // consistent corner radius, and want this radius to remain in windowed fullscreen.
+        if self.is_windowed_fullscreen() && rules.clip_to_geometry != Some(true) {
             return CornerRadius::default();
         }
-        self.rules().geometry_corner_radius.unwrap_or_default()
+
+        rules.geometry_corner_radius.unwrap_or_default()
     }
 
     fn is_child_of(&self, parent: &Self) -> bool;
