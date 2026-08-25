@@ -1,5 +1,22 @@
+<!--
+  niri-anland — fork of niri-wm/niri with the anland (Android/Droidspaces) backend.
+
+  Branch layout:
+    master  = pristine mirror of upstream niri-wm/niri (sync only; do not commit here)
+    anland  = default; master + anland backend + anland-sys + color/cursor/blink fixes
+              release tags: 26.4.0-anland.N
+
+  Sync upstream:
+    git fetch upstream --tags
+    git checkout master && git merge --ff-only <upstream-tag>
+    git checkout anland && git rebase master   # then retag
+
+  This is the single source of truth for the niri side. The anland daemon,
+  libraries, consumers and magisk module live in the separate `anland` repo.
+  anland-sys (vendored producer FFI) lives HERE.
+-->
 <h1 align="center"><img alt="niri" src="https://github.com/user-attachments/assets/07d05cd0-d5dc-4a28-9a35-51bae8f119a0"></h1>
-<p align="center">A scrollable-tiling Wayland compositor.</p>
+<p align="center">A scrollable-tiling Wayland compositor — anland backend fork.</p>
 <p align="center">
     <a href="https://matrix.to/#/#niri:matrix.org"><img alt="Matrix" src="https://img.shields.io/badge/matrix-%23niri-blue?logo=matrix"></a>
     <a href="https://github.com/niri-wm/niri/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/niri-wm/niri"></a>
