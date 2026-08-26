@@ -896,13 +896,13 @@ impl Anland {
         // just got may hold pixels from an older frame. When the damage
         // tracker reports nothing to redraw it skips rendering entirely and
         // `res.damage` is None, which would leave us presenting stale content
-        // -> blink. Re-render the whole frame (age 0) so the buffer is never
-        // stale.
+        // -> blink. Reuse previous buffer content (age 1) instead of forcing
+        // age 0 (full repaint), avoiding heavy GPU redraws when an app is open.
         if res.damage.is_none() {
             res = match damage_tracker.render_output(
                 &mut self.renderer,
                 &mut target,
-                0,
+                1,
                 &elements,
                 [0.0, 0.0, 0.0, 1.0],
             ) {
@@ -914,10 +914,8 @@ impl Anland {
             };
         }
 
-        if let Err(err) = res.sync.wait() {
-            warn!("error waiting for frame completion: {err:?}");
-        }
-
+        // Non-blocking frame submit: do not block the event loop on res.sync.wait().
+        // Let Mesa / KGSL driver handle async queuing.
         niri.update_primary_scanout_output(output, &res.states);
 
         self.ctx.set_render_fence(-1);
