@@ -859,7 +859,12 @@ impl Anland {
         } else {
             0
         };
-        let age = if std::env::var_os("ANLAND_FULL_REPAINT").is_some() {
+        // Android Consumer cycles a 4-buffer queue (ages 1..4). When calculated_age > 1
+        // (reusing a buffer from 2..4 frames ago), partial damage repaints (like cursor motion)
+        // leave stale pixels from old frames in non-damaged tiles, causing cursor flickering/glitches.
+        // Force full repaint (age 0) if ANLAND_FULL_REPAINT is set OR if the buffer age is > 1
+        // to guarantee buffer cleanliness across Android's BufferQueue.
+        let age = if std::env::var_os("ANLAND_FULL_REPAINT").is_some() || calculated_age > 1 {
             0
         } else {
             calculated_age
