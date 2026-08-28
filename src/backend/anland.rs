@@ -854,10 +854,15 @@ impl Anland {
         // fresh/reused buffer we cannot reconstruct) makes the tracker repaint
         // the whole frame, which keeps correctness at the cost of a full draw.
         let last = self.last_frame_per_buffer[idx as usize];
-        let age = if last >= 0 {
+        let calculated_age = if last >= 0 {
             (self.frame_count - last as u64) as usize
         } else {
             0
+        };
+        let age = if std::env::var_os("ANLAND_FULL_REPAINT").is_some() {
+            0
+        } else {
+            calculated_age
         };
         self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
         self.frame_count = self.frame_count.wrapping_add(1);
@@ -896,13 +901,13 @@ impl Anland {
         // just got may hold pixels from an older frame. When the damage
         // tracker reports nothing to redraw it skips rendering entirely and
         // `res.damage` is None, which would leave us presenting stale content
-        // -> blink. Reuse previous buffer content (age 1) instead of forcing
-        // age 0 (full repaint), avoiding heavy GPU redraws when an app is open.
+        // -> blink. Perform a full repaint (age 0) to ensure correctness
+        // and prevent tile corruption / micro-flicker on high-refresh displays.
         if res.damage.is_none() {
             res = match damage_tracker.render_output(
                 &mut self.renderer,
                 &mut target,
-                1,
+                0,
                 &elements,
                 [0.0, 0.0, 0.0, 1.0],
             ) {
