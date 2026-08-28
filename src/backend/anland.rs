@@ -859,16 +859,13 @@ impl Anland {
         } else {
             0
         };
-        // Android Consumer cycles a 4-buffer queue (ages 1..4). When calculated_age > 1
-        // (reusing a buffer from 2..4 frames ago), partial damage repaints (like cursor motion)
-        // leave stale pixels from old frames in non-damaged tiles, causing cursor flickering/glitches.
-        // Force full repaint (age 0) if ANLAND_FULL_REPAINT is set OR if the buffer age is > 1
-        // to guarantee buffer cleanliness across Android's BufferQueue.
-        let age = if std::env::var_os("ANLAND_FULL_REPAINT").is_some() || calculated_age > 1 {
-            0
-        } else {
-            calculated_age
-        };
+        // On Mesa KGSL / Adreno GPUs with tile-based UBWC rendering, partial-damage
+        // repaints (age >= 1) leave 99% of GPU tiles untouched. For small elements
+        // like software cursor motion (32x32px), partial tile skipping causes Adreno
+        // tile-binning corruption and severe flickering around the moving pointer.
+        // Always force full repaint (age = 0) on the Anland backend to guarantee
+        // complete tile rendering and 100% flicker-free cursor/window movement.
+        let age = 0;
         self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
         self.frame_count = self.frame_count.wrapping_add(1);
 
