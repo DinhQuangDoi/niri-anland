@@ -850,16 +850,20 @@ impl Anland {
         // The consumer cycles its BufferQueue slots (here 4), so a reused slot
         // holds the frame rendered `frame_count - last_frame_per_buffer[idx]`
         // frames ago. Smithay OutputDamageTracker keeps history up to age 4.
-        // If calculated_age is between 1 and 4, pass it to damage_tracker so
-        // Smithay repaints accumulated damage since that buffer was last rendered.
-        // Otherwise (new buffer or age > 4), pass age 0 for a clean full repaint.
+        // During Overview animations/open state or when ANLAND_FULL_REPAINT is set,
+        // force age 0 (full repaint) to prevent overview backdrop flickering.
+        // Otherwise if calculated_age is between 1 and 4, pass it to damage_tracker.
         let last = self.last_frame_per_buffer[idx as usize];
         let calculated_age = if last >= 0 {
             (self.frame_count - last as u64) as usize
         } else {
             0
         };
-        let age = if calculated_age >= 1 && calculated_age <= 4 {
+        let is_overview = niri.layout.is_overview_open();
+        let force_full = is_overview || std::env::var_os("ANLAND_FULL_REPAINT").is_some();
+        let age = if force_full {
+            0
+        } else if calculated_age >= 1 && calculated_age <= 4 {
             calculated_age
         } else {
             0
@@ -883,7 +887,7 @@ impl Anland {
         };
 
         let damage_tracker = self.damage_tracker.as_mut().unwrap();
-        let res = match damage_tracker.render_output(
+        let mut res = match damage_tracker.render_output(
             &mut self.renderer,
             &mut target,
             age,
@@ -896,6 +900,25 @@ impl Anland {
                 return RenderResult::Skipped;
             }
         };
+
+        // When damage is None (e.g. Noctalia Settings / popups / overlays open but static),
+        // perform a single full repaint (age 0) so transparent popups/overlays never display
+        // stale background pixels on rotating Android dmabuf slots.
+        if res.damage.is_none() {
+            res = match damage_tracker.render_output(
+                &mut self.renderer,
+                &mut target,
+                0,
+                &elements,
+                [0.0, 0.0, 0.0, 1.0],
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("render error: {e:?}");
+                    return RenderResult::Skipped;
+                }
+            };
+        }
 
         niri.update_primary_scanout_output(output, &res.states);
 
