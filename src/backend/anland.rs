@@ -848,23 +848,14 @@ impl Anland {
         }
 
         // The consumer cycles its BufferQueue slots (here 4), so a reused slot
-        // holds the frame rendered `frame_count - last_frame_per_buffer[idx]`
-        // frames ago. Smithay OutputDamageTracker keeps history up to age 4.
-        // During Overview animations/open state or when ANLAND_FULL_REPAINT is set,
-        // force age 0 (full repaint) to prevent overview backdrop flickering.
-        // Otherwise if calculated_age is between 1 and 4, pass it to damage_tracker.
+        // holds the frame rendered `frame_count - last_frame_per_buffer[i]`
+        // frames ago. Report that as the buffer age so the damage tracker
+        // repaints exactly the regions that changed in between. Age 0 (a
+        // fresh/reused buffer we cannot reconstruct) makes the tracker repaint
+        // the whole frame, which keeps correctness at the cost of a full draw.
         let last = self.last_frame_per_buffer[idx as usize];
-        let calculated_age = if last >= 0 {
+        let age = if last >= 0 {
             (self.frame_count - last as u64) as usize
-        } else {
-            0
-        };
-        let is_overview = niri.layout.is_overview_open();
-        let force_full = is_overview || std::env::var_os("ANLAND_FULL_REPAINT").is_some();
-        let age = if force_full {
-            0
-        } else if calculated_age >= 1 && calculated_age <= 4 {
-            calculated_age
         } else {
             0
         };
@@ -901,14 +892,17 @@ impl Anland {
             }
         };
 
-        // When damage is None (e.g. Noctalia Settings / popups / overlays open but static),
-        // perform a single full repaint (age 0) so transparent popups/overlays never display
-        // stale background pixels on rotating Android dmabuf slots.
+        // The consumer hands out a rotating pool of buffers, so the slot we
+        // just got may hold pixels from an older frame. When the damage
+        // tracker reports nothing to redraw it skips rendering entirely and
+        // `res.damage` is None, which would leave us presenting stale content
+        // -> blink. Reuse previous buffer content (age 1) instead of forcing
+        // age 0 (full repaint), avoiding heavy GPU redraws when an app is open.
         if res.damage.is_none() {
             res = match damage_tracker.render_output(
                 &mut self.renderer,
                 &mut target,
-                0,
+                1,
                 &elements,
                 [0.0, 0.0, 0.0, 1.0],
             ) {
