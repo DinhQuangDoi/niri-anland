@@ -849,23 +849,21 @@ impl Anland {
 
         // The consumer cycles its BufferQueue slots (here 4), so a reused slot
         // holds the frame rendered `frame_count - last_frame_per_buffer[idx]`
-        // frames ago. Report that as the buffer age so the damage tracker
-        // repaints exactly the regions that changed in between. Age 0 (a
-        // fresh/reused buffer we cannot reconstruct) makes the tracker repaint
-        // the whole frame, which keeps correctness at the cost of a full draw.
+        // frames ago. Smithay OutputDamageTracker keeps history up to age 4.
+        // If calculated_age is between 1 and 4, pass it to damage_tracker so
+        // Smithay repaints accumulated damage since that buffer was last rendered.
+        // Otherwise (new buffer or age > 4), pass age 0 for a clean full repaint.
         let last = self.last_frame_per_buffer[idx as usize];
         let calculated_age = if last >= 0 {
             (self.frame_count - last as u64) as usize
         } else {
             0
         };
-        // On Mesa KGSL / Adreno GPUs with tile-based UBWC rendering, partial-damage
-        // repaints (age >= 1) leave 99% of GPU tiles untouched. For small elements
-        // like software cursor motion (32x32px), partial tile skipping causes Adreno
-        // tile-binning corruption and severe flickering around the moving pointer.
-        // Always force full repaint (age = 0) on the Anland backend to guarantee
-        // complete tile rendering and 100% flicker-free cursor/window movement.
-        let age = 0;
+        let age = if calculated_age >= 1 && calculated_age <= 4 {
+            calculated_age
+        } else {
+            0
+        };
         self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
         self.frame_count = self.frame_count.wrapping_add(1);
 
@@ -885,7 +883,7 @@ impl Anland {
         };
 
         let damage_tracker = self.damage_tracker.as_mut().unwrap();
-        let mut res = match damage_tracker.render_output(
+        let res = match damage_tracker.render_output(
             &mut self.renderer,
             &mut target,
             age,
@@ -899,30 +897,6 @@ impl Anland {
             }
         };
 
-        // The consumer hands out a rotating pool of buffers, so the slot we
-        // just got may hold pixels from an older frame. When the damage
-        // tracker reports nothing to redraw it skips rendering entirely and
-        // `res.damage` is None, which would leave us presenting stale content
-        // -> blink. Perform a full repaint (age 0) to ensure correctness
-        // and prevent tile corruption / micro-flicker on high-refresh displays.
-        if res.damage.is_none() {
-            res = match damage_tracker.render_output(
-                &mut self.renderer,
-                &mut target,
-                0,
-                &elements,
-                [0.0, 0.0, 0.0, 1.0],
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("render error: {e:?}");
-                    return RenderResult::Skipped;
-                }
-            };
-        }
-
-        // Non-blocking frame submit: do not block the event loop on res.sync.wait().
-        // Let Mesa / KGSL driver handle async queuing.
         niri.update_primary_scanout_output(output, &res.states);
 
         self.ctx.set_render_fence(-1);
