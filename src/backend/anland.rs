@@ -134,6 +134,7 @@ pub struct Anland {
     frame_times: std::collections::VecDeque<u64>,
 
     reconnect_timer_token: Option<RegistrationToken>,
+    heartbeat_timer_token: Option<RegistrationToken>,
     buf_ready_source_token: Option<RegistrationToken>,
     data_source_token: Option<RegistrationToken>,
 
@@ -178,6 +179,7 @@ impl Anland {
             dmabuf_global: None,
             dmabufs: Vec::new(),
             reconnect_timer_token: None,
+            heartbeat_timer_token: None,
             buf_ready_source_token: None,
             data_source_token: None,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
@@ -322,6 +324,33 @@ impl Anland {
         }
     }
 
+    fn start_heartbeat_timer(&mut self, niri: &mut Niri) {
+        if let Some(token) = self.heartbeat_timer_token.take() {
+            let _ = niri.event_loop.remove(token);
+        }
+
+        let info = self.ctx.screen_info();
+        let refresh_mhz = if info.refresh > 0 { info.refresh } else { 60000 };
+        let refresh_hz = (refresh_mhz / 1000).max(30);
+        let interval_ms = (1000 / refresh_hz).max(4) as u64;
+
+        let timer = Timer::from_duration(Duration::from_millis(interval_ms));
+        if let Ok(token) = niri.event_loop.insert_source(
+            timer,
+            move |_, _, state| {
+                let anland = state.backend.anland();
+                if !anland.ctx.is_fallback() {
+                    if let Some(output) = anland.output.clone() {
+                        state.niri.queue_redraw(&output);
+                    }
+                }
+                TimeoutAction::ToDuration(Duration::from_millis(interval_ms))
+            },
+        ) {
+            self.heartbeat_timer_token = Some(token);
+        }
+    }
+
     fn try_reconnect(&mut self, niri: &mut Niri) {
         if !self.ctx.is_fallback() {
             return;
@@ -393,6 +422,7 @@ impl Anland {
 
         self.register_buffer_ready_source(niri);
         self.register_input_source(niri);
+        self.start_heartbeat_timer(niri);
     }
 
     /*
