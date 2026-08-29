@@ -385,6 +385,12 @@ impl Anland {
         let dims = (dmabuf_w != 0).then_some((dmabuf_w as i32, dmabuf_h as i32));
         self.update_output_mode_with(dims);
 
+        // Re-create the damage tracker so its internal frame history is reset
+        // and synchronized with the newly connected consumer's dmabuf pool.
+        if let Some(output) = &self.output {
+            self.damage_tracker = Some(OutputDamageTracker::from_output(output));
+        }
+
         self.register_buffer_ready_source(niri);
         self.register_input_source(niri);
     }
@@ -855,7 +861,12 @@ impl Anland {
         // the whole frame, which keeps correctness at the cost of a full draw.
         let last = self.last_frame_per_buffer[idx as usize];
         let age = if last >= 0 {
-            (self.frame_count - last as u64) as usize
+            let calculated_age = (self.frame_count - last as u64) as usize;
+            if calculated_age >= 1 && calculated_age <= 4 {
+                calculated_age
+            } else {
+                0
+            }
         } else {
             0
         };
