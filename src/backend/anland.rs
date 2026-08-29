@@ -853,23 +853,13 @@ impl Anland {
             return RenderResult::Skipped;
         }
 
-        // The consumer cycles its BufferQueue slots (here 4), so a reused slot
-        // holds the frame rendered `frame_count - last_frame_per_buffer[i]`
-        // frames ago. Report that as the buffer age so the damage tracker
-        // repaints exactly the regions that changed in between. Age 0 (a
-        // fresh/reused buffer we cannot reconstruct) makes the tracker repaint
-        // the whole frame, which keeps correctness at the cost of a full draw.
-        let last = self.last_frame_per_buffer[idx as usize];
-        let age = if last >= 0 {
-            let calculated_age = (self.frame_count - last as u64) as usize;
-            if calculated_age >= 1 && calculated_age <= 4 {
-                calculated_age
-            } else {
-                0
-            }
-        } else {
-            0
-        };
+        // On the Anland display backend, the Android Consumer cycles a rotating pool
+        // of dmabufs across Android SurfaceFlinger. Partial-damage repaints (age >= 1)
+        // leave old/stale pixels untouched on rotating buffers, causing periodic
+        // screen-wide flickering during animations, mouse motion, or shell overlays.
+        // Always force full repaint (age = 0) on the Anland backend so every frame
+        // rendered to the consumer's dmabuf is 100% complete and self-contained.
+        let age = 0;
         self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
         self.frame_count = self.frame_count.wrapping_add(1);
 
@@ -889,7 +879,7 @@ impl Anland {
         };
 
         let damage_tracker = self.damage_tracker.as_mut().unwrap();
-        let mut res = match damage_tracker.render_output(
+        let res = match damage_tracker.render_output(
             &mut self.renderer,
             &mut target,
             age,
@@ -902,28 +892,6 @@ impl Anland {
                 return RenderResult::Skipped;
             }
         };
-
-        // The consumer hands out a rotating pool of buffers, so the slot we
-        // just got may hold pixels from an older frame. When the damage
-        // tracker reports nothing to redraw it skips rendering entirely and
-        // `res.damage` is None, which would leave us presenting stale content
-        // -> blink. Reuse previous buffer content (age 1) instead of forcing
-        // age 0 (full repaint), avoiding heavy GPU redraws when an app is open.
-        if res.damage.is_none() {
-            res = match damage_tracker.render_output(
-                &mut self.renderer,
-                &mut target,
-                1,
-                &elements,
-                [0.0, 0.0, 0.0, 1.0],
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("render error: {e:?}");
-                    return RenderResult::Skipped;
-                }
-            };
-        }
 
         niri.update_primary_scanout_output(output, &res.states);
 
