@@ -883,13 +883,23 @@ impl Anland {
             return RenderResult::Skipped;
         }
 
-        // On the Anland display backend, the Android Consumer cycles a rotating pool
-        // of dmabufs across Android SurfaceFlinger. Partial-damage repaints (age >= 1)
-        // leave old/stale pixels untouched on rotating buffers, causing periodic
-        // screen-wide flickering during animations, mouse motion, or shell overlays.
-        // Always force full repaint (age = 0) on the Anland backend so every frame
-        // rendered to the consumer's dmabuf is 100% complete and self-contained.
-        let age = 0;
+        // The consumer cycles its BufferQueue slots (here 4), so a reused slot
+        // holds the frame rendered `frame_count - last_frame_per_buffer[idx]`
+        // frames ago. Smithay OutputDamageTracker keeps history up to age 4.
+        // If calculated_age is between 1 and 4, pass it to damage_tracker so
+        // Smithay repaints accumulated damage since that buffer was last rendered.
+        // Otherwise (new buffer or age > 4), pass age 0 for a clean full repaint.
+        let last = self.last_frame_per_buffer[idx as usize];
+        let age = if last >= 0 {
+            let calculated_age = (self.frame_count - last as u64) as usize;
+            if calculated_age >= 1 && calculated_age <= 4 {
+                calculated_age
+            } else {
+                0
+            }
+        } else {
+            0
+        };
         self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
         self.frame_count = self.frame_count.wrapping_add(1);
 
