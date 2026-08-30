@@ -11,7 +11,6 @@ use niri_config::OutputName;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{Axis, ButtonState, InputEvent as SmithayInputEvent, KeyState};
-use smithay::backend::egl::context::{GlAttributes, PixelFormatRequirements};
 use smithay::backend::egl::native::EGLSurfacelessDisplay;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -165,28 +164,8 @@ impl Anland {
         let display =
             unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }
                 .context("error creating EGL display")?;
-        // Request 8-bit alpha for correct transparent clear/shadow compositing
-        // on Adreno/KGSL. depth_bits/stencil_bits MUST be None — requesting
-        // depth/stencil on a surfaceless display crashes the Adreno KGSL
-        // kernel driver (kernel panic / force reboot).
-        let attributes = GlAttributes {
-            version: (3, 0),
-            profile: None,
-            debug: false,
-            vsync: false,
-        };
-        let reqs = PixelFormatRequirements {
-            hardware_accelerated: Some(true),
-            color_bits: Some(24),
-            float_color_buffer: false,
-            alpha_bits: Some(8),
-            depth_bits: None,
-            stencil_bits: None,
-            multisampling: None,
-        };
         let context =
-            EGLContext::new_with_config(&display, attributes, reqs)
-                .context("error creating EGL context with 8-bit alpha")?;
+            EGLContext::new(&display).context("error creating EGL context")?;
         let renderer =
             unsafe { GlesRenderer::new(context) }.context("error creating renderer")?;
 
