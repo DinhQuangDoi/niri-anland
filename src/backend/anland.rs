@@ -11,7 +11,6 @@ use niri_config::OutputName;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{Axis, ButtonState, InputEvent as SmithayInputEvent, KeyState};
-use smithay::backend::egl::context::{GlAttributes, PixelFormatRequirements};
 use smithay::backend::egl::native::EGLSurfacelessDisplay;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -165,15 +164,8 @@ impl Anland {
         let display =
             unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }
                 .context("error creating EGL display")?;
-        let attributes = GlAttributes {
-            version: (3, 0),
-            profile: None,
-            debug: false,
-            vsync: false,
-        };
         let context =
-            EGLContext::new_with_config(&display, attributes, PixelFormatRequirements::_8_bit())
-                .context("error creating EGL context with 8-bit alpha")?;
+            EGLContext::new(&display).context("error creating EGL context")?;
         let renderer =
             unsafe { GlesRenderer::new(context) }.context("error creating renderer")?;
 
