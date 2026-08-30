@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::mem;
-use std::os::fd::{BorrowedFd, IntoRawFd, OwnedFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,7 +12,6 @@ use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{Axis, ButtonState, InputEvent as SmithayInputEvent, KeyState};
 use smithay::backend::egl::native::EGLSurfacelessDisplay;
-use smithay::backend::egl::fence::EGLFence;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -132,7 +131,6 @@ pub struct Anland {
     ctx: AnlandContext,
     _socket_path: String,
 
-    egl_display: EGLDisplay,
     renderer: GlesRenderer,
     output: Option<Output>,
     damage_tracker: Option<OutputDamageTracker>,
@@ -192,7 +190,6 @@ impl Anland {
         Ok(Self {
             ctx,
             _socket_path: socket_path,
-            egl_display: display,
             renderer,
             output: None,
             damage_tracker: None,
@@ -918,34 +915,17 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Create an EGL native sync fence (EGL_SYNC_NATIVE_FENCE_ANDROID)
-        // matching KWin's anland backend. This exports a Linux sync file
-        // fd and hands it to the Android consumer -> SurfaceFlinger queueBuffer().
-        // SurfaceFlinger GPU-waits on this fence before scanout, completely
-        // eliminating tearing and glitch artifacts without ANY CPU glFinish stall (120 FPS!).
-        let render_fence_fd = match EGLFence::create(&self.egl_display) {
-            Ok(fence) => match fence.export() {
-                Ok(fd) => fd.into_raw_fd(),
-                Err(e) => {
-                    trace!("could not export native fence: {e:?}");
-                    -1
-                }
-            },
-            Err(e) => {
-                trace!("could not create EGL fence: {e:?}");
-                -1
-            }
-        };
-
-        // If fence creation/export failed, fall back to gl_finish
-        if render_fence_fd < 0 {
-            gl_finish();
-        }
+        // Flush and wait for all GPU rendering commands to complete before
+        // notifying the consumer. Without a GPU sync fence, SurfaceFlinger
+        // scans out the dmabuf immediately upon queueBuffer; if the GPU is
+        // still executing render commands, it causes severe tearing/glitch artifacts.
+        // gl_finish guarantees 100% complete pixels in the dmabuf (~1ms on Adreno 730/740).
+        gl_finish();
 
         // Always signal the consumer so it does not time out (5s poll
         // in refresh_done). The consumer drives the frame cadence via
         // buf_ready — we must always respond.
-        self.ctx.set_render_fence(render_fence_fd);
+        self.ctx.set_render_fence(-1);
         self.ctx.trigger_refresh();
 
         // If nothing changed on screen, skip frame-callback dispatch
