@@ -51,8 +51,8 @@ impl Shadow {
         let width = self.config.softness;
         // Like in CSS box-shadow.
         let sigma = width / 2.;
-        // Adjust width to draw all necessary pixels.
-        let width = ceil(sigma * 3.);
+        // Adjust width to draw all necessary pixels out to 4.5 sigma for seamless Gaussian falloff.
+        let width = ceil(sigma * 4.5);
 
         let offset = self.config.offset;
         let offset = Point::from((ceil(offset.x.0), ceil(offset.y.0)));

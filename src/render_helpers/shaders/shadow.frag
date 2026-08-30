@@ -54,11 +54,11 @@ float roundedBoxShadow(vec2 lower, vec2 upper, vec2 point, float sigma, float co
   vec2 halfSize = (upper - lower) * 0.5;
   point -= center;
 
-  // The signal is only non-zero in a limited range, so don't waste samples
+  // The signal reaches zero below 0.0001 at 4.5 sigma, eliminating hard boundary lines
   float low = point.y - halfSize.y;
   float high = point.y + halfSize.y;
-  float start = clamp(-3.0 * sigma, low, high);
-  float end = clamp(3.0 * sigma, low, high);
+  float start = clamp(-4.5 * sigma, low, high);
+  float end = clamp(4.5 * sigma, low, high);
 
   // Accumulate samples with 8 steps for smooth gradient falloff on high-DPI displays
   float step = (end - start) / 8.0;
