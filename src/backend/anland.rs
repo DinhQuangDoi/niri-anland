@@ -3,7 +3,7 @@ use std::ffi::CString;
 use std::mem;
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -39,6 +39,23 @@ use super::{IpcOutputMap, OutputId, RenderResult};
 use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
+
+type GlFlushFn = unsafe extern "C" fn();
+static GL_FLUSH: OnceLock<Option<GlFlushFn>> = OnceLock::new();
+
+fn gl_flush() {
+    let func = GL_FLUSH.get_or_init(|| {
+        let addr = unsafe { smithay::backend::egl::get_proc_address("glFlush") };
+        if addr.is_null() {
+            None
+        } else {
+            Some(unsafe { std::mem::transmute::<*const (), GlFlushFn>(addr as *const ()) })
+        }
+    });
+    if let Some(f) = func {
+        unsafe { f() };
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Calloop event source for polling raw file descriptors
@@ -896,6 +913,10 @@ impl Anland {
         };
 
         niri.update_primary_scanout_output(output, &res.states);
+
+        // Push commands to GPU pipeline without stalling CPU.
+        // This mitigates tearing while keeping 120 FPS performance.
+        gl_flush();
 
         // Always signal the consumer so it does not time out (5s poll
         // in refresh_done). The consumer drives the frame cadence via
