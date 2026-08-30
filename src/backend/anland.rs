@@ -37,11 +37,25 @@ use super::anland_input::{
 };
 use super::{IpcOutputMap, OutputId, RenderResult};
 use crate::niri::{Niri, RedrawState, State};
+use std::sync::OnceLock;
 use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
 
-extern "C" {
-    fn glFinish();
+type GlFinishFn = unsafe extern "C" fn();
+static GL_FINISH: OnceLock<Option<GlFinishFn>> = OnceLock::new();
+
+fn gl_finish() {
+    let func = GL_FINISH.get_or_init(|| {
+        let addr = unsafe { smithay::backend::egl::get_proc_address("glFinish") };
+        if addr.is_null() {
+            None
+        } else {
+            Some(unsafe { std::mem::transmute::<*const (), GlFinishFn>(addr as *const ()) })
+        }
+    });
+    if let Some(f) = func {
+        unsafe { f() };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -905,10 +919,8 @@ impl Anland {
         // notifying the consumer. Without a GPU sync fence, SurfaceFlinger
         // scans out the dmabuf immediately upon queueBuffer; if the GPU is
         // still executing render commands, it causes severe tearing/glitch artifacts.
-        // glFinish guarantees 100% complete pixels in the dmabuf (~1ms on Adreno 730/740).
-        unsafe {
-            glFinish();
-        }
+        // gl_finish guarantees 100% complete pixels in the dmabuf (~1ms on Adreno 730/740).
+        gl_finish();
 
         // Always signal the consumer so it does not time out (5s poll
         // in refresh_done). The consumer drives the frame cadence via
