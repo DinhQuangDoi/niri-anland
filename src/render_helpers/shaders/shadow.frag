@@ -60,11 +60,11 @@ float roundedBoxShadow(vec2 lower, vec2 upper, vec2 point, float sigma, float co
   float start = clamp(-3.0 * sigma, low, high);
   float end = clamp(3.0 * sigma, low, high);
 
-  // Accumulate samples (we can get away with surprisingly few samples)
-  float step = (end - start) / 4.0;
+  // Accumulate samples with 8 steps for smooth gradient falloff on high-DPI displays
+  float step = (end - start) / 8.0;
   float y = start + step * 0.5;
   float value = 0.0;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 8; i++) {
     value += roundedBoxShadowX(point.x, point.y - y, sigma, corner, halfSize) * gaussian(y, sigma) * step;
     y += step;
   }
