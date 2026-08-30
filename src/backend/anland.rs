@@ -40,6 +40,10 @@ use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
 
+extern "C" {
+    fn glFinish();
+}
+
 // ---------------------------------------------------------------------------
 // Calloop event source for polling raw file descriptors
 // ---------------------------------------------------------------------------
@@ -896,6 +900,15 @@ impl Anland {
         };
 
         niri.update_primary_scanout_output(output, &res.states);
+
+        // Flush and wait for all GPU rendering commands to complete before
+        // notifying the consumer. Without a GPU sync fence, SurfaceFlinger
+        // scans out the dmabuf immediately upon queueBuffer; if the GPU is
+        // still executing render commands, it causes severe tearing/glitch artifacts.
+        // glFinish guarantees 100% complete pixels in the dmabuf (~1ms on Adreno 730/740).
+        unsafe {
+            glFinish();
+        }
 
         // Always signal the consumer so it does not time out (5s poll
         // in refresh_done). The consumer drives the frame cadence via
