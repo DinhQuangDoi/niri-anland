@@ -894,7 +894,7 @@ impl Anland {
             &mut target,
             age,
             &elements,
-            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
         ) {
             Ok(r) => r,
             Err(e) => {
