@@ -889,10 +889,6 @@ impl Anland {
         };
         let elements = niri.render_to_vec(ctx, output, true);
 
-        // Flush all offscreen render passes (window snapshots, blur, shadows)
-        // so their textures are fully committed before the main composition pass.
-        gl_flush();
-
         let mut target = match self.renderer.bind(&mut self.dmabufs[idx as usize]) {
             Ok(t) => t,
             Err(e) => {
