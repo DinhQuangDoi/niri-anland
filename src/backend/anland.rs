@@ -932,10 +932,6 @@ impl Anland {
         // other Wayland clients now that the frame has been presented.
         niri.send_frame_callbacks(output);
 
-        if niri.output_state[output].unfinished_animations_remain {
-            niri.queue_redraw(output);
-        }
-
         let frame_time_ms = frame_start.elapsed().as_millis() as u64;
         self.frame_times.push_back(frame_time_ms);
         if self.frame_times.len() > 60 {
