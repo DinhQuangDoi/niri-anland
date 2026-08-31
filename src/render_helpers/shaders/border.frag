@@ -212,8 +212,13 @@ float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
 
 void main() {
     vec3 coords_geo = input_to_geo * vec3(niri_v_coords, 1.0);
+    float rounding_alpha = niri_rounding_alpha(coords_geo.xy, geo_size, outer_radius);
+    if (rounding_alpha <= 0.0005) {
+        discard;
+    }
+
     vec4 color = gradient_color(coords_geo.xy);
-    color = color * niri_rounding_alpha(coords_geo.xy, geo_size, outer_radius);
+    color = color * rounding_alpha;
 
     if (border_width > 0.0) {
         coords_geo -= vec3(border_width);
@@ -222,11 +227,16 @@ void main() {
                 && 0.0 <= coords_geo.y && coords_geo.y <= inner_geo_size.y)
         {
             vec4 inner_radius = max(outer_radius - vec4(border_width), 0.0);
-            color = color * (1.0 - niri_rounding_alpha(coords_geo.xy, inner_geo_size, inner_radius));
+            float inner_alpha = niri_rounding_alpha(coords_geo.xy, inner_geo_size, inner_radius);
+            color = color * (1.0 - inner_alpha);
         }
     }
 
     color = color * niri_alpha;
+
+    if (color.a <= 0.0005) {
+        discard;
+    }
 
 #if defined(DEBUG_FLAGS)
     if (niri_tint == 1.0)

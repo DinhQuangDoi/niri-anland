@@ -78,6 +78,16 @@ void main() {
     vec3 coords_geo = input_to_geo * vec3(niri_v_coords, 1.0);
     vec3 coords_window_geo = window_input_to_geo * vec3(niri_v_coords, 1.0);
 
+    // Fast-bounding discard: if the fragment is further than 4.5 * sigma away
+    // from the shadow rectangle, the gaussian weight is strictly below 0.0001
+    // (invisible). Discarding early skips the entire 8-step integration loop.
+    if (sigma >= 0.1) {
+        vec2 d = max(-coords_geo.xy, coords_geo.xy - geo_size);
+        if (max(d.x, d.y) > 4.5 * sigma) {
+            discard;
+        }
+    }
+
     vec4 color = shadow_color;
 
     float shadow_value;
@@ -97,6 +107,11 @@ void main() {
             corner_radius.x
         );
     }
+
+    if (shadow_value <= 0.0005) {
+        discard;
+    }
+
     color = color * shadow_value;
 
     // Cut out the inside of the window geometry if requested.
@@ -109,6 +124,10 @@ void main() {
     }
 
     color = color * niri_alpha;
+
+    if (color.a <= 0.0005) {
+        discard;
+    }
 
 #if defined(DEBUG_FLAGS)
     if (niri_tint == 1.0)

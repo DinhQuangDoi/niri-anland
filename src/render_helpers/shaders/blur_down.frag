@@ -1,6 +1,6 @@
 #version 100
 
-precision highp float;
+precision mediump float;
 
 varying vec2 v_coords;
 
