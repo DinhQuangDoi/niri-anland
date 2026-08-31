@@ -3,7 +3,7 @@ use niri_config::{Config, LayerRule};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::desktop::{LayerSurface, PopupKind, PopupManager};
-use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Size};
 use smithay::wayland::compositor::{remove_pre_commit_hook, HookId};
 use smithay::wayland::shell::wlr_layer::{ExclusiveZone, Layer};
 
@@ -216,12 +216,17 @@ impl MappedLayer {
             push(elem.into());
         } else {
             // Layer surfaces don't have extra geometry like windows.
-            let buf_pos = location;
+            // Align physical position to even boundaries to prevent subpixel clipping artifacts.
+            let physical_pos: Point<i32, Physical> = location.to_physical_precise_round(scale);
+            let physical_pos = Point::from((
+                (physical_pos.x & !1),
+                (physical_pos.y & !1),
+            ));
 
             push_elements_from_surface_tree(
                 ctx.renderer,
                 surface,
-                buf_pos.to_physical_precise_round(scale),
+                physical_pos,
                 scale,
                 alpha,
                 Kind::ScanoutCandidate,

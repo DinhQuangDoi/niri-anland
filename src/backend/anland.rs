@@ -41,11 +41,23 @@ use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
 
 mod gl {
+    use std::ffi::c_void;
     use std::sync::OnceLock;
 
-    type GlFn = unsafe extern "C" fn();
-    static GL_FLUSH: OnceLock<Option<GlFn>> = OnceLock::new();
-    static GL_FINISH: OnceLock<Option<GlFn>> = OnceLock::new();
+    pub const SYNC_GPU_COMMANDS_COMPLETE: u32 = 0x9117;
+    pub const TIMEOUT_IGNORED: u64 = 0xFFFFFFFFFFFFFFFF;
+
+    pub type GLsync = *mut c_void;
+
+    type GlFlushFn = unsafe extern "C" fn();
+    type GlFenceSyncFn = unsafe extern "C" fn(u32, u32) -> GLsync;
+    type GlWaitSyncFn = unsafe extern "C" fn(GLsync, u32, u64);
+    type GlDeleteSyncFn = unsafe extern "C" fn(GLsync);
+
+    static GL_FLUSH: OnceLock<Option<GlFlushFn>> = OnceLock::new();
+    static GL_FENCE_SYNC: OnceLock<Option<GlFenceSyncFn>> = OnceLock::new();
+    static GL_WAIT_SYNC: OnceLock<Option<GlWaitSyncFn>> = OnceLock::new();
+    static GL_DELETE_SYNC: OnceLock<Option<GlDeleteSyncFn>> = OnceLock::new();
 
     #[allow(non_snake_case)]
     pub unsafe fn Flush() {
@@ -54,7 +66,7 @@ mod gl {
             if addr.is_null() {
                 None
             } else {
-                Some(std::mem::transmute::<*const (), GlFn>(addr as *const ()))
+                Some(std::mem::transmute::<*const (), GlFlushFn>(addr as *const ()))
             }
         });
         if let Some(f) = func {
@@ -63,17 +75,55 @@ mod gl {
     }
 
     #[allow(non_snake_case)]
-    pub unsafe fn Finish() {
-        let func = GL_FINISH.get_or_init(|| {
-            let addr = smithay::backend::egl::get_proc_address("glFinish");
+    pub unsafe fn FenceSync(condition: u32, flags: u32) -> GLsync {
+        let func = GL_FENCE_SYNC.get_or_init(|| {
+            let addr = smithay::backend::egl::get_proc_address("glFenceSync");
             if addr.is_null() {
                 None
             } else {
-                Some(std::mem::transmute::<*const (), GlFn>(addr as *const ()))
+                Some(std::mem::transmute::<*const (), GlFenceSyncFn>(addr as *const ()))
             }
         });
         if let Some(f) = func {
-            f();
+            f(condition, flags)
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
+    #[allow(non_snake_case)]
+    pub unsafe fn WaitSync(sync: GLsync, flags: u32, timeout: u64) {
+        if sync.is_null() {
+            return;
+        }
+        let func = GL_WAIT_SYNC.get_or_init(|| {
+            let addr = smithay::backend::egl::get_proc_address("glWaitSync");
+            if addr.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<*const (), GlWaitSyncFn>(addr as *const ()))
+            }
+        });
+        if let Some(f) = func {
+            f(sync, flags, timeout);
+        }
+    }
+
+    #[allow(non_snake_case)]
+    pub unsafe fn DeleteSync(sync: GLsync) {
+        if sync.is_null() {
+            return;
+        }
+        let func = GL_DELETE_SYNC.get_or_init(|| {
+            let addr = smithay::backend::egl::get_proc_address("glDeleteSync");
+            if addr.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<*const (), GlDeleteSyncFn>(addr as *const ()))
+            }
+        });
+        if let Some(f) = func {
+            f(sync);
         }
     }
 }
@@ -906,15 +956,17 @@ impl Anland {
             return RenderResult::Skipped;
         }
 
-        // On anland, the Android consumer rotates buffers via SurfaceFlinger
-        // dequeueBuffer(), which does not follow a strict monotonic cycle.
-        // Using partial damage with buffer age desynchronizes with Smithay's
-        // damage history ring buffer whenever the consumer slot order diverges,
-        // causing severe flickering between full and partial repaints.
-        // We always use age 0 (full repaint) so every dequeued dmabuf is cleanly
-        // and completely rendered. On modern Adreno GPUs (730/740), full repaint
-        // takes ~1ms and guarantees zero visual artifacts or tearing.
-        let age = 0;
+        let last = self.last_frame_per_buffer[idx as usize];
+        let age = if last >= 0 {
+            let calculated_age = (self.frame_count - last as u64) as usize;
+            if calculated_age >= 1 && calculated_age <= 4 {
+                calculated_age
+            } else {
+                0
+            }
+        } else {
+            0
+        };
         self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
         self.frame_count = self.frame_count.wrapping_add(1);
 
@@ -950,11 +1002,14 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Force Adreno GPU to complete all rendering commands before submitting
-        // buffer to Anland.
+        // Asynchronous GPU Fence Synchronization:
+        // Flushes command stream and instructs GPU to wait on previous commands
+        // without stalling the CPU thread, preserving 60-120 FPS.
         unsafe {
             gl::Flush();
-            gl::Finish();
+            let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
+            gl::WaitSync(fence, 0, gl::TIMEOUT_IGNORED);
+            gl::DeleteSync(fence);
         }
 
         let egl_display_handle = self.renderer.egl_context().display().get_display_handle();
