@@ -55,12 +55,14 @@ mod gl {
     type GlWaitSyncFn = unsafe extern "C" fn(GLsync, u32, u64);
     type GlClientWaitSyncFn = unsafe extern "C" fn(GLsync, u32, u64) -> u32;
     type GlDeleteSyncFn = unsafe extern "C" fn(GLsync);
+    type EglSwapIntervalFn = unsafe extern "C" fn(smithay::backend::egl::ffi::egl::types::EGLDisplay, i32) -> u32;
 
     static GL_FLUSH: OnceLock<Option<GlFlushFn>> = OnceLock::new();
     static GL_FENCE_SYNC: OnceLock<Option<GlFenceSyncFn>> = OnceLock::new();
     static GL_WAIT_SYNC: OnceLock<Option<GlWaitSyncFn>> = OnceLock::new();
     static GL_CLIENT_WAIT_SYNC: OnceLock<Option<GlClientWaitSyncFn>> = OnceLock::new();
     static GL_DELETE_SYNC: OnceLock<Option<GlDeleteSyncFn>> = OnceLock::new();
+    static EGL_SWAP_INTERVAL: OnceLock<Option<EglSwapIntervalFn>> = OnceLock::new();
 
     #[allow(non_snake_case)]
     pub unsafe fn Flush() {
@@ -147,6 +149,21 @@ mod gl {
         });
         if let Some(f) = func {
             f(sync);
+        }
+    }
+
+    #[allow(non_snake_case)]
+    pub unsafe fn SwapInterval(display: smithay::backend::egl::ffi::egl::types::EGLDisplay, interval: i32) {
+        let func = EGL_SWAP_INTERVAL.get_or_init(|| {
+            let addr = smithay::backend::egl::get_proc_address("eglSwapInterval");
+            if addr.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<*const (), EglSwapIntervalFn>(addr as *const ()))
+            }
+        });
+        if let Some(f) = func {
+            f(display, interval);
         }
     }
 }
@@ -360,6 +377,12 @@ impl Anland {
 
         resources::init(&mut self.renderer);
         shaders::init(&mut self.renderer);
+
+        // Disable EGL swap interval in compositor to avoid double VSync lock
+        let egl_display_handle = self.renderer.egl_context().display().get_display_handle();
+        unsafe {
+            gl::SwapInterval(egl_display_handle.handle, 0);
+        }
 
         self.create_dmabuf_global(niri);
 
@@ -1025,15 +1048,14 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Targeted CPU-Side Fence Wait:
-        // Flush commands and wait up to 16ms for this frame's fence only.
-        // Ensures Anland Consumer reads 100% finished pixels without purging
-        // the entire graphics pipeline like glFinish().
+        // Non-blocking GPU Fence Polling (timeout = 0):
+        // Flushes command stream without stalling the CPU thread, preventing
+        // lockstep VSync 50% FPS drops while maintaining hardware sync.
         unsafe {
             gl::Flush();
             let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
             if !fence.is_null() {
-                gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 16_000_000);
+                gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 0);
                 gl::DeleteSync(fence);
             }
         }
