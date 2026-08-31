@@ -622,17 +622,20 @@ impl Anland {
     }
 
     /// Poll the daemon for queued input and return the translated smithay
-    /// events. Uses non-blocking batch read to drain all queued events
-    /// in a single syscall, completely eliminating cursor lag/delay.
-    fn poll_input(&mut self, _timeout: i32) -> Vec<SmithayInputEvent<AnlandInput>> {
+    /// events. Non-input notifications (display refresh, clipboard) are
+    /// handled internally and not forwarded.
+    fn poll_input(&mut self, timeout: i32) -> Vec<SmithayInputEvent<AnlandInput>> {
         let mut out = Vec::new();
-        let raw_events = self.ctx.poll_input_events_batch(64);
-        for event in raw_events {
+        loop {
+            let Some(event) = self.ctx.poll_input_event(timeout) else {
+                break;
+            };
             if self.handle_special_event(&event) {
                 continue;
             }
             match self.to_smithay_event(&event) {
                 Some(smithay_event) => out.push(smithay_event),
+                
                 None => {
                     if event.type_ == anland_sys::INPUT_TYPE_TEXT_INPUT {
                         let u = unsafe {
@@ -676,6 +679,7 @@ impl Anland {
                         self.ctx.handle_unhandled_event(&event);
                     }
                 }
+
             }
         }
         out
