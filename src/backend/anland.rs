@@ -1006,7 +1006,15 @@ impl Anland {
         }
 
         let last = self.last_frame_per_buffer[idx as usize];
-        let age = if last >= 0 {
+        // Force full damage (age = 0) while the overview is animating (in/out
+        // transition). During scaling, the window transformation matrices are
+        // floating-point, and partial-damage rectangles get clipped 1-2 px off
+        // on Adreno/Turnip (sub-pixel jitter). Repainting the whole output is
+        // what Hyprland/Sway also do for global geometric transitions.
+        let overview_animating = niri.layout.is_overview_animating();
+        let age = if overview_animating {
+            0
+        } else if last >= 0 {
             let calculated_age = (self.frame_count - last as u64) as usize;
             if calculated_age >= 1 && calculated_age <= 4 {
                 calculated_age

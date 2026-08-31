@@ -5010,6 +5010,15 @@ impl<W: LayoutElement> Layout<W> {
     pub fn is_overview_open(&self) -> bool {
         self.overview_open
     }
+
+    /// Returns true when the overview is actively animating (in/out transition).
+    /// Used by the backend to force full damage during overview transitions,
+    /// preventing sub-pixel partial damage clipping jitter on Adreno/Turnip.
+    pub fn is_overview_animating(&self) -> bool {
+        self.overview_progress
+            .as_ref()
+            .is_some_and(|p| p.is_animation())
+    }
 }
 
 impl<W: LayoutElement> Default for MonitorSet<W> {
