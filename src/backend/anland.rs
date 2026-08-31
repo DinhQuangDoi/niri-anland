@@ -1048,14 +1048,22 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Non-blocking GPU Fence Polling (timeout = 0):
-        // Flushes command stream without stalling the CPU thread, preventing
-        // lockstep VSync 50% FPS drops while maintaining hardware sync.
+        // GPU fence synchronization strategy:
+        // - When the overview is open, Noctalia layer-shell overlays (bar /
+        //   control center / dock) alpha-blend over the scaled workspaces,
+        //   producing a multi-surface race where the Consumer can read a dmabuf
+        //   before the GPU finishes the overlapping alpha writes. In that case
+        //   we wait on this frame's fence with a small timeout so the Consumer
+        //   only ever reads 100% finished pixels.
+        // - Otherwise keep a non-blocking poll (timeout = 0) so the CPU render
+        //   thread never stalls and full 120 FPS is preserved.
+        let overview_open = niri.layout.is_overview_open();
+        let sync_timeout = if overview_open { 4_000_000 } else { 0 };
         unsafe {
             gl::Flush();
             let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
             if !fence.is_null() {
-                gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 0);
+                gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, sync_timeout);
                 gl::DeleteSync(fence);
             }
         }

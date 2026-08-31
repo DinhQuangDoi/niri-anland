@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update -y
-          apt-get install -y ${{ env.DEPS_APT }} git
+          apt-get install -y ${{ env.DEPS_APT }} git ccache
 
       - name: Install Rust
         run: |
@@ -35,10 +35,38 @@ jobs:
           export PATH="$HOME/.cargo/bin:${PATH}"
           rustc --version
 
+      # Custom ccache-based cache keyed on Cargo.lock + relevant crate sources.
+      # The build.rs/cc builds (anland-sys C producer + smithay EGL FFI) benefit
+      # most, and Cargo caches the Rust crates for the heavy parts.
+      - name: ccache cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ccache-${{ runner.arch }}-
+
+      - name: cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-${{ runner.arch }}-
+
       - name: Build
         run: |
           export PATH="$HOME/.cargo/bin:${PATH}"
+          export CC="ccache $CC"
+          export CXX="ccache $CXX"
+          ccache --max-size=2G
+          export CARGO_BUILD_JOBS=4
           cargo build --release
+          ccache --show-stats
 
       - name: Show binary
         run: |
