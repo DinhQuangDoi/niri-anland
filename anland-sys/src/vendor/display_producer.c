@@ -591,3 +591,56 @@ int poll_input_event_extend_fds(display_ctx *ctx, int* fds, int fd_count, int ti
 int get_service_fds(display_ctx *ctx, int *fds, int max_fds, int timeout_ms) {
     return poll_input_event_extend_fds(ctx, fds, max_fds, timeout_ms);
 }
+
+#ifndef EGL_SYNC_NATIVE_FENCE_ANDROID
+#define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3144
+#endif
+#ifndef EGL_NO_SYNC_KHR
+#define EGL_NO_SYNC_KHR ((void *)0)
+#endif
+#ifndef EGL_NO_NATIVE_FENCE_FD_ANDROID
+#define EGL_NO_NATIVE_FENCE_FD_ANDROID -1
+#endif
+
+typedef void *(*eglGetProcAddress_t)(const char *procname);
+typedef void *(*eglCreateSyncKHR_t)(void *dpy, unsigned int type, const int *attrib_list);
+typedef int (*eglDupNativeFenceFDANDROID_t)(void *dpy, void *sync);
+typedef unsigned int (*eglDestroySyncKHR_t)(void *dpy, void *sync);
+
+int create_native_render_fence(void *egl_display)
+{
+    if (!egl_display)
+        return -1;
+
+    void *egl_handle = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_LOCAL);
+    if (!egl_handle)
+        egl_handle = dlopen("libEGL.so", RTLD_LAZY | RTLD_LOCAL);
+    if (!egl_handle)
+        return -1;
+
+    eglGetProcAddress_t get_proc = (eglGetProcAddress_t)dlsym(egl_handle, "eglGetProcAddress");
+    if (!get_proc) {
+        dlclose(egl_handle);
+        return -1;
+    }
+
+    eglCreateSyncKHR_t p_createSync = (eglCreateSyncKHR_t)get_proc("eglCreateSyncKHR");
+    eglDupNativeFenceFDANDROID_t p_dupFence = (eglDupNativeFenceFDANDROID_t)get_proc("eglDupNativeFenceFDANDROID");
+    eglDestroySyncKHR_t p_destroySync = (eglDestroySyncKHR_t)get_proc("eglDestroySyncKHR");
+
+    if (!p_createSync || !p_dupFence || !p_destroySync) {
+        dlclose(egl_handle);
+        return -1;
+    }
+
+    void *sync = p_createSync(egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    if (sync == EGL_NO_SYNC_KHR || !sync) {
+        dlclose(egl_handle);
+        return -1;
+    }
+
+    int fence_fd = p_dupFence(egl_display, sync);
+    p_destroySync(egl_display, sync);
+    dlclose(egl_handle);
+    return fence_fd;
+}

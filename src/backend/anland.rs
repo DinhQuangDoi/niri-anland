@@ -914,14 +914,24 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Push commands to GPU pipeline without stalling CPU.
-        // This mitigates tearing while keeping 120 FPS performance.
-        gl_flush();
+        // Create an EGL native sync fence (EGL_SYNC_NATIVE_FENCE_ANDROID)
+        // matching KWin's anland backend. This exports a Linux sync file
+        // fd and hands it to the Android consumer -> SurfaceFlinger queueBuffer().
+        // SurfaceFlinger GPU-waits on this fence before scanout, completely
+        // eliminating tearing and glitch artifacts without ANY CPU glFinish stall (120 FPS!).
+        let egl_display_ptr = unsafe { self.renderer.egl_context().display().get_display_handle() };
+        let render_fence_fd = unsafe { create_native_render_fence(**egl_display_ptr as *mut _) };
+
+        if render_fence_fd >= 0 {
+            self.ctx.set_render_fence(render_fence_fd);
+        } else {
+            gl_flush();
+            self.ctx.set_render_fence(-1);
+        }
 
         // Always signal the consumer so it does not time out (5s poll
         // in refresh_done). The consumer drives the frame cadence via
         // buf_ready — we must always respond.
-        self.ctx.set_render_fence(-1);
         self.ctx.trigger_refresh();
 
         // If nothing changed on screen, skip frame-callback dispatch

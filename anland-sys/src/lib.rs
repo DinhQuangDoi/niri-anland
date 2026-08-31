@@ -229,6 +229,7 @@ extern "C" {
     pub fn get_dmabuf_fd_at(ctx: *mut display_ctx, idx: c_int) -> c_int;
     pub fn get_dmabuf_info(ctx: *mut display_ctx, info: *mut buf_info) -> c_int;
     pub fn get_dmabuf_info_at(ctx: *mut display_ctx, idx: c_int, info: *mut buf_info) -> c_int;
+    pub fn create_native_render_fence(egl_display: *mut c_void) -> c_int;
 }
 
 // ---------------------------------------------------------------------------

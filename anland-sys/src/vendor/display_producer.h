@@ -76,4 +76,8 @@ int  get_dmabuf_fd_at(display_ctx *ctx, int idx);
 int  get_dmabuf_info(display_ctx *ctx, struct buf_info *info);
 int  get_dmabuf_info_at(display_ctx *ctx, int idx, struct buf_info *info);
 
+/* Create and export an Android EGL native sync fence (EGL_SYNC_NATIVE_FENCE_ANDROID)
+ * returning a Linux sync file fd, or -1 on failure. */
+int create_native_render_fence(void *egl_display);
+
 #endif
