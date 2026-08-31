@@ -40,20 +40,41 @@ use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
 
-type GlFlushFn = unsafe extern "C" fn();
-static GL_FLUSH: OnceLock<Option<GlFlushFn>> = OnceLock::new();
+mod gl {
+    use std::sync::OnceLock;
 
-fn gl_flush() {
-    let func = GL_FLUSH.get_or_init(|| {
-        let addr = unsafe { smithay::backend::egl::get_proc_address("glFlush") };
-        if addr.is_null() {
-            None
-        } else {
-            Some(unsafe { std::mem::transmute::<*const (), GlFlushFn>(addr as *const ()) })
+    type GlFn = unsafe extern "C" fn();
+    static GL_FLUSH: OnceLock<Option<GlFn>> = OnceLock::new();
+    static GL_FINISH: OnceLock<Option<GlFn>> = OnceLock::new();
+
+    #[allow(non_snake_case)]
+    pub unsafe fn Flush() {
+        let func = GL_FLUSH.get_or_init(|| {
+            let addr = smithay::backend::egl::get_proc_address("glFlush");
+            if addr.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<*const (), GlFn>(addr as *const ()))
+            }
+        });
+        if let Some(f) = func {
+            f();
         }
-    });
-    if let Some(f) = func {
-        unsafe { f() };
+    }
+
+    #[allow(non_snake_case)]
+    pub unsafe fn Finish() {
+        let func = GL_FINISH.get_or_init(|| {
+            let addr = smithay::backend::egl::get_proc_address("glFinish");
+            if addr.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<*const (), GlFn>(addr as *const ()))
+            }
+        });
+        if let Some(f) = func {
+            f();
+        }
     }
 }
 
@@ -929,18 +950,19 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Create an EGL native sync fence (EGL_SYNC_NATIVE_FENCE_ANDROID)
-        // matching KWin's anland backend. This exports a Linux sync file
-        // fd and hands it to the Android consumer -> SurfaceFlinger queueBuffer().
-        // SurfaceFlinger GPU-waits on this fence before scanout, completely
-        // eliminating tearing and glitch artifacts without ANY CPU glFinish stall (120 FPS!).
+        // Force Adreno GPU to complete all rendering commands before submitting
+        // buffer to Anland.
+        unsafe {
+            gl::Flush();
+            gl::Finish();
+        }
+
         let egl_display_handle = self.renderer.egl_context().display().get_display_handle();
         let render_fence_fd = unsafe { create_native_render_fence(egl_display_handle.handle as *mut _) };
 
         if render_fence_fd >= 0 {
             self.ctx.set_render_fence(render_fence_fd);
         } else {
-            gl_flush();
             self.ctx.set_render_fence(-1);
         }
 
