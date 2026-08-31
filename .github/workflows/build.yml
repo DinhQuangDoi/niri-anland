@@ -41,7 +41,7 @@ jobs:
       - name: ccache cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/ccache
+          path: /root/.cache/ccache
           key: ccache-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ccache-${{ runner.arch }}-
@@ -61,9 +61,9 @@ jobs:
       - name: Build
         run: |
           export PATH="$HOME/.cargo/bin:${PATH}"
-          export CC="ccache $CC"
-          export CXX="ccache $CXX"
-          ccache --max-size=2G
+          export CC="ccache gcc"
+          export CXX="ccache g++"
+          ccache --max-size=2G --set-config cache_dir=/root/.cache/ccache
           export CARGO_BUILD_JOBS=4
           cargo build --release
           ccache --show-stats
