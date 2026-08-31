@@ -607,41 +607,65 @@ typedef void *(*eglGetProcAddress_t)(const char *procname);
 typedef void *(*eglCreateSyncKHR_t)(void *dpy, unsigned int type, const int *attrib_list);
 typedef int (*eglDupNativeFenceFDANDROID_t)(void *dpy, void *sync);
 typedef unsigned int (*eglDestroySyncKHR_t)(void *dpy, void *sync);
+typedef void (*glFlush_t)(void);
+
+static eglCreateSyncKHR_t s_pCreateSync = NULL;
+static eglDupNativeFenceFDANDROID_t s_pDupFence = NULL;
+static eglDestroySyncKHR_t s_pDestroySync = NULL;
+static glFlush_t s_pGlFlush = NULL;
+static bool s_egl_inited = false;
+
+static void init_egl_procs(void)
+{
+    if (s_egl_inited)
+        return;
+    s_egl_inited = true;
+
+    void *egl_handle = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_LOCAL);
+    if (!egl_handle)
+        egl_handle = dlopen("libEGL.so", RTLD_LAZY | RTLD_LOCAL);
+    if (!egl_handle)
+        return;
+
+    eglGetProcAddress_t get_proc = (eglGetProcAddress_t)dlsym(egl_handle, "eglGetProcAddress");
+    if (get_proc) {
+        s_pCreateSync = (eglCreateSyncKHR_t)get_proc("eglCreateSyncKHR");
+        s_pDupFence = (eglDupNativeFenceFDANDROID_t)get_proc("eglDupNativeFenceFDANDROID");
+        s_pDestroySync = (eglDestroySyncKHR_t)get_proc("eglDestroySyncKHR");
+        s_pGlFlush = (glFlush_t)get_proc("glFlush");
+    }
+    if (!s_pGlFlush) {
+        void *gles_handle = dlopen("libGLESv2.so.2", RTLD_LAZY | RTLD_LOCAL);
+        if (!gles_handle)
+            gles_handle = dlopen("libGLESv2.so", RTLD_LAZY | RTLD_LOCAL);
+        if (gles_handle) {
+            s_pGlFlush = (glFlush_t)dlsym(gles_handle, "glFlush");
+        }
+    }
+}
 
 int create_native_render_fence(void *egl_display)
 {
     if (!egl_display)
         return -1;
 
-    void *egl_handle = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_LOCAL);
-    if (!egl_handle)
-        egl_handle = dlopen("libEGL.so", RTLD_LAZY | RTLD_LOCAL);
-    if (!egl_handle)
-        return -1;
+    init_egl_procs();
 
-    eglGetProcAddress_t get_proc = (eglGetProcAddress_t)dlsym(egl_handle, "eglGetProcAddress");
-    if (!get_proc) {
-        dlclose(egl_handle);
+    // MUST flush GL pipeline before creating fence sync
+    if (s_pGlFlush) {
+        s_pGlFlush();
+    }
+
+    if (!s_pCreateSync || !s_pDupFence || !s_pDestroySync) {
         return -1;
     }
 
-    eglCreateSyncKHR_t p_createSync = (eglCreateSyncKHR_t)get_proc("eglCreateSyncKHR");
-    eglDupNativeFenceFDANDROID_t p_dupFence = (eglDupNativeFenceFDANDROID_t)get_proc("eglDupNativeFenceFDANDROID");
-    eglDestroySyncKHR_t p_destroySync = (eglDestroySyncKHR_t)get_proc("eglDestroySyncKHR");
-
-    if (!p_createSync || !p_dupFence || !p_destroySync) {
-        dlclose(egl_handle);
-        return -1;
-    }
-
-    void *sync = p_createSync(egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    void *sync = s_pCreateSync(egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
     if (sync == EGL_NO_SYNC_KHR || !sync) {
-        dlclose(egl_handle);
         return -1;
     }
 
-    int fence_fd = p_dupFence(egl_display, sync);
-    p_destroySync(egl_display, sync);
-    dlclose(egl_handle);
+    int fence_fd = s_pDupFence(egl_display, sync);
+    s_pDestroySync(egl_display, sync);
     return fence_fd;
 }

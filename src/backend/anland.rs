@@ -550,8 +550,23 @@ impl Anland {
                 let anland = state.backend.anland();
                 anland.poll_input(0)
             };
+            // Pointer motion coalescing: if multiple pointer motion events arrived
+            // in the same batch, only process non-motion events (buttons, keys) and
+            // the latest pointer motion to avoid flooding the compositor and clients
+            // with redundant intermediate layout/render cycles.
+            let mut last_motion: Option<SmithayInputEvent<AnlandInput>> = None;
             for event in events {
-                state.process_input_event(event);
+                if matches!(event, SmithayInputEvent::PointerMotionAbsolute { .. }) {
+                    last_motion = Some(event);
+                } else {
+                    if let Some(motion) = last_motion.take() {
+                        state.process_input_event(motion);
+                    }
+                    state.process_input_event(event);
+                }
+            }
+            if let Some(motion) = last_motion {
+                state.process_input_event(motion);
             }
             // Adopt clipboard text copied on Android as the Wayland selection so
             // compositor-local clients can paste it. Safe to touch Wayland state here:
