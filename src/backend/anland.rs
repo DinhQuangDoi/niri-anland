@@ -46,6 +46,9 @@ mod gl {
 
     pub const SYNC_GPU_COMMANDS_COMPLETE: u32 = 0x9117;
     pub const SYNC_FLUSH_COMMANDS_BIT: u32 = 0x00000001;
+    pub const ALREADY_SIGNALED: u32 = 0x911A;
+    pub const CONDITION_SATISFIED: u32 = 0x911C;
+    pub const TIMEOUT_EXPIRED: u32 = 0x9119;
     pub const TIMEOUT_IGNORED: u64 = 0xFFFFFFFFFFFFFFFF;
 
     pub type GLsync = *mut c_void;
@@ -1048,33 +1051,41 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // GPU fence synchronization strategy:
-        // - When the overview is open, Noctalia layer-shell overlays (bar /
-        //   control center / dock) alpha-blend over the scaled workspaces,
-        //   producing a multi-surface race where the Consumer can read a dmabuf
-        //   before the GPU finishes the overlapping alpha writes. In that case
-        //   we wait on this frame's fence with a small timeout so the Consumer
-        //   only ever reads 100% finished pixels.
-        // - Otherwise keep a non-blocking poll (timeout = 0) so the CPU render
-        //   thread never stalls and full 120 FPS is preserved.
-        let overview_open = niri.layout.is_overview_open();
-        let sync_timeout = if overview_open { 4_000_000 } else { 0 };
+        // GPU fence synchronization (Test 13):
+        // Always flush + wait up to 4ms per frame, then check the fence status.
+        // When the GPU completes (ALREADY_SIGNALED or CONDITION_SATISFIED), the
+        // Consumer only ever reads fully-rendered pixels — eliminating the
+        // out-of-order presentation jitter that timeout=0 caused.
+        // 4ms is well within the 8.3ms budget at 120Hz, so full FPS is preserved.
         unsafe {
             gl::Flush();
             let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
             if !fence.is_null() {
-                gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, sync_timeout);
+                let status = gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 4_000_000);
+                let gpu_done = status == gl::ALREADY_SIGNALED || status == gl::CONDITION_SATISFIED;
                 gl::DeleteSync(fence);
+
+                if gpu_done {
+                    // GPU finished — submit the native render fence fd so the
+                    // Consumer can wait on it for cross-process sync.
+                    let egl_display_handle =
+                        self.renderer.egl_context().display().get_display_handle();
+                    let render_fence_fd = unsafe {
+                        create_native_render_fence(egl_display_handle.handle as *mut _)
+                    };
+                    if render_fence_fd >= 0 {
+                        self.ctx.set_render_fence(render_fence_fd);
+                    } else {
+                        self.ctx.set_render_fence(-1);
+                    }
+                } else {
+                    // Timeout — GPU not done yet (unlikely at 4ms).
+                    // Still proceed; we cannot stall the render thread forever.
+                    self.ctx.set_render_fence(-1);
+                }
+            } else {
+                self.ctx.set_render_fence(-1);
             }
-        }
-
-        let egl_display_handle = self.renderer.egl_context().display().get_display_handle();
-        let render_fence_fd = unsafe { create_native_render_fence(egl_display_handle.handle as *mut _) };
-
-        if render_fence_fd >= 0 {
-            self.ctx.set_render_fence(render_fence_fd);
-        } else {
-            self.ctx.set_render_fence(-1);
         }
 
         // Always signal the consumer so it does not time out (5s poll
