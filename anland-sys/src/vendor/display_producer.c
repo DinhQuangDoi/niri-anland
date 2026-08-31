@@ -409,6 +409,42 @@ int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
     memcpy(event, msg_buf + sizeof(struct data_msg), sizeof(*event));
     return 1;
 }
+
+int poll_input_events_batch(display_ctx *ctx, struct InputEvent *events, int max_events)
+{
+    if (ctx->fallback || max_events <= 0)
+        return 0;
+
+    int count = 0;
+    while (count < max_events) {
+        uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct InputEvent)];
+        ssize_t n = recv(ctx->data_fd, msg_buf, sizeof(msg_buf), MSG_DONTWAIT);
+        if (n <= 0) {
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                break;
+            if (n == 0) {
+                enter_fallback(ctx);
+                return -1;
+            }
+            break;
+        }
+
+        if (n < (ssize_t)sizeof(msg_buf)) {
+            size_t remaining = sizeof(msg_buf) - (size_t)n;
+            if (recv_all(ctx->data_fd, msg_buf + n, remaining) < 0) {
+                return -1;
+            }
+        }
+
+        struct data_msg hdr;
+        memcpy(&hdr, msg_buf, sizeof(hdr));
+        if (hdr.type == DATA_MSG_INPUT_EVENT) {
+            memcpy(&events[count], msg_buf + sizeof(struct data_msg), sizeof(struct InputEvent));
+            count++;
+        }
+    }
+    return count;
+}
 int push_output_event(display_ctx *ctx, const struct OutputEvent *event)
 {
     if (ctx->fallback)

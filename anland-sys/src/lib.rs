@@ -200,6 +200,11 @@ extern "C" {
         event: *mut InputEvent,
         timeout_ms: c_int,
     ) -> c_int;
+    pub fn poll_input_events_batch(
+        ctx: *mut display_ctx,
+        events: *mut InputEvent,
+        max_events: c_int,
+    ) -> c_int;
     pub fn poll_input_event_extend_data(
         ctx: *mut display_ctx,
         payload: *mut c_void,
@@ -353,6 +358,23 @@ impl AnlandContext {
             Some(event)
         } else {
             None
+        }
+    }
+
+    pub fn poll_input_events_batch(&self, max_events: usize) -> Vec<InputEvent> {
+        let mut events = vec![unsafe { std::mem::zeroed::<InputEvent>() }; max_events];
+        let ret = unsafe {
+            poll_input_events_batch(
+                self.ctx,
+                events.as_mut_ptr(),
+                max_events as c_int,
+            )
+        };
+        if ret > 0 {
+            events.truncate(ret as usize);
+            events
+        } else {
+            Vec::new()
         }
     }
 

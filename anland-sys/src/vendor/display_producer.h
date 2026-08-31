@@ -43,6 +43,7 @@ int  trigger_refresh(display_ctx *ctx);
 /* Pull one pending input event. Returns 1 if an event was written, 0 if none was
  * available, -1 on consumer loss. No-op (returns 0) in fallback. */
 int  poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms);
+int  poll_input_events_batch(display_ctx *ctx, struct InputEvent *events, int max_events);
 int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms);
 
 int push_output_event(display_ctx *ctx, const struct OutputEvent *event);
