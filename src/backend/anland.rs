@@ -45,6 +45,7 @@ mod gl {
     use std::sync::OnceLock;
 
     pub const SYNC_GPU_COMMANDS_COMPLETE: u32 = 0x9117;
+    pub const SYNC_FLUSH_COMMANDS_BIT: u32 = 0x00000001;
     pub const TIMEOUT_IGNORED: u64 = 0xFFFFFFFFFFFFFFFF;
 
     pub type GLsync = *mut c_void;
@@ -52,11 +53,13 @@ mod gl {
     type GlFlushFn = unsafe extern "C" fn();
     type GlFenceSyncFn = unsafe extern "C" fn(u32, u32) -> GLsync;
     type GlWaitSyncFn = unsafe extern "C" fn(GLsync, u32, u64);
+    type GlClientWaitSyncFn = unsafe extern "C" fn(GLsync, u32, u64) -> u32;
     type GlDeleteSyncFn = unsafe extern "C" fn(GLsync);
 
     static GL_FLUSH: OnceLock<Option<GlFlushFn>> = OnceLock::new();
     static GL_FENCE_SYNC: OnceLock<Option<GlFenceSyncFn>> = OnceLock::new();
     static GL_WAIT_SYNC: OnceLock<Option<GlWaitSyncFn>> = OnceLock::new();
+    static GL_CLIENT_WAIT_SYNC: OnceLock<Option<GlClientWaitSyncFn>> = OnceLock::new();
     static GL_DELETE_SYNC: OnceLock<Option<GlDeleteSyncFn>> = OnceLock::new();
 
     #[allow(non_snake_case)]
@@ -106,6 +109,26 @@ mod gl {
         });
         if let Some(f) = func {
             f(sync, flags, timeout);
+        }
+    }
+
+    #[allow(non_snake_case)]
+    pub unsafe fn ClientWaitSync(sync: GLsync, flags: u32, timeout: u64) -> u32 {
+        if sync.is_null() {
+            return 0;
+        }
+        let func = GL_CLIENT_WAIT_SYNC.get_or_init(|| {
+            let addr = smithay::backend::egl::get_proc_address("glClientWaitSync");
+            if addr.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<*const (), GlClientWaitSyncFn>(addr as *const ()))
+            }
+        });
+        if let Some(f) = func {
+            f(sync, flags, timeout)
+        } else {
+            0
         }
     }
 
@@ -1002,14 +1025,17 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Asynchronous GPU Fence Synchronization:
-        // Flushes command stream and instructs GPU to wait on previous commands
-        // without stalling the CPU thread, preserving 60-120 FPS.
+        // Targeted CPU-Side Fence Wait:
+        // Flush commands and wait up to 16ms for this frame's fence only.
+        // Ensures Anland Consumer reads 100% finished pixels without purging
+        // the entire graphics pipeline like glFinish().
         unsafe {
             gl::Flush();
             let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
-            gl::WaitSync(fence, 0, gl::TIMEOUT_IGNORED);
-            gl::DeleteSync(fence);
+            if !fence.is_null() {
+                gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 16_000_000);
+                gl::DeleteSync(fence);
+            }
         }
 
         let egl_display_handle = self.renderer.egl_context().display().get_display_handle();
