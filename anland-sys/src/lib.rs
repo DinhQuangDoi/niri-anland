@@ -21,11 +21,11 @@ pub struct buf_info {
     pub offset: u32,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct InputEvent {
     pub type_: u32,
-    pub touch: InputTouch,
+    pub data: InputEventUnion,
 }
 
 #[repr(C)]
@@ -124,11 +124,11 @@ pub struct InputResource {
     pub fdnum: u32,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct OutputEvent {
     pub type_: u32,
-    pub clipboard: OutputClipboard,
+    pub data: OutputEventUnion,
 }
 
 #[repr(C)]
@@ -174,6 +174,12 @@ pub const INPUT_TYPE_ACTION: u32 = 10;
 pub const INPUT_TYPE_RESOURCE: u32 = 11;
 pub const INPUT_TYPE_RESOURCE_INVALID: u32 = 12;
 pub const INPUT_TYPE_DISPLAY_ROTATION: u32 = 13;
+
+// Input action constants
+pub const INPUT_ACTION_DOWN: i32 = 0;
+pub const INPUT_ACTION_UP: i32 = 1;
+pub const INPUT_ACTION_MOVE: i32 = 2;
+pub const INPUT_ACTION_CANCEL: i32 = 3;
 
 // Output event type constants
 pub const OUTPUT_TYPE_CLIPBOARD: u32 = 1;
@@ -386,48 +392,28 @@ impl AnlandContext {
     }
 
     pub fn push_set_consumer_var(&mut self, var: u32, value: u32) {
-        let mut event: OutputEvent = unsafe { std::mem::zeroed() };
-        event.type_ = OUTPUT_TYPE_SET_CONSUMER_VAR;
-        unsafe {
-            let u: OutputEventUnion = std::mem::zeroed();
-            let mut u = u;
-            u.set_consumer_var = OutputSetConsumerVar { var, value };
-            event.clipboard.size = u.set_consumer_var.var;
-            std::ptr::copy_nonoverlapping(
-                &u as *const OutputEventUnion as *const u8,
-                &mut event.clipboard as *mut OutputClipboard as *mut u8,
-                std::mem::size_of::<OutputEventUnion>(),
-            );
-        }
+        let event = OutputEvent {
+            type_: OUTPUT_TYPE_SET_CONSUMER_VAR,
+            data: OutputEventUnion {
+                set_consumer_var: OutputSetConsumerVar { var, value },
+            },
+        };
         self.push_output_event(&event);
     }
 
     pub fn handle_unhandled_event(&self, event: &InputEvent) {
+        const MAX_EVENT_EXTEND_SIZE: usize = 16 * 1024 * 1024; // 16 MB cap
+
         if event.type_ == INPUT_TYPE_TEXT_INPUT {
-            let u = unsafe {
-                let mut u: InputEventUnion = std::mem::zeroed();
-                std::ptr::copy_nonoverlapping(&event.touch as *const _ as *const u8, &mut u as *mut _ as *mut u8, std::mem::size_of::<InputEventUnion>());
-                u
-            };
-            let size = unsafe { u.text_input.size as usize };
-            if size > 0 {
+            let size = unsafe { event.data.text_input.size as usize };
+            if size > 0 && size <= MAX_EVENT_EXTEND_SIZE {
                 let mut buf = vec![0u8; size];
                 self.poll_input_event_extend_data(&mut buf, 1000);
             }
         }
         if event.type_ == INPUT_TYPE_CLIPBOARD {
-            let u = unsafe {
-                let u: InputEventUnion = std::mem::zeroed();
-                let mut u = u;
-                std::ptr::copy_nonoverlapping(
-                    &event.touch as *const InputTouch as *const u8,
-                    &mut u as *mut InputEventUnion as *mut u8,
-                    std::mem::size_of::<InputEventUnion>(),
-                );
-                u
-            };
-            let size = unsafe { u.clipboard.size as usize };
-            if size > 0 {
+            let size = unsafe { event.data.clipboard.size as usize };
+            if size > 0 && size <= MAX_EVENT_EXTEND_SIZE {
                 let mut buf = vec![0u8; size];
                 self.poll_input_event_extend_data(&mut buf, 1000);
             }

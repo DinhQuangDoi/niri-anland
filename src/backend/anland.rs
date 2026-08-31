@@ -270,8 +270,6 @@ pub struct Anland {
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
-    debug_tint: bool,
-
     // Clipboard text received from the Android consumer (anland INPUT_TYPE_CLIPBOARD),
     // staged for the event loop to adopt as the Wayland selection.
     pending_clipboard: Option<Vec<u8>>,
@@ -312,7 +310,6 @@ impl Anland {
             buf_ready_source_token: None,
             data_source_token: None,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
-            debug_tint: false,
             pending_clipboard: None,
             pending_rotation: None,
             frame_count: 0,
@@ -532,15 +529,6 @@ impl Anland {
         self.register_input_source(niri);
     }
 
-    /*
-     * The output may have been created with the fallback screen (no consumer was
-     * connected when the compositor booted). Once the consumer is up, refresh the
-     * output mode with its real screen size.
-     */
-    fn update_output_mode(&mut self) {
-        self.update_output_mode_with(None);
-    }
-
     fn update_output_mode_with(&mut self, dims: Option<(i32, i32)>) {
         // Prefer the freshly received dmabuf dimensions over the (possibly
         // stale) daemon-cached screen info: they describe the buffers that
@@ -634,13 +622,24 @@ impl Anland {
         if let Ok(token) = niri.event_loop.insert_source(source, move |_, _, state| {
             let anland = state.backend.anland();
             let fd = anland.ctx.buffer_ready_fd();
+            if fd < 0 {
+                return;
+            }
             let mut val: u64 = 0;
-            unsafe {
+            let ret = unsafe {
                 libc::read(
                     fd,
                     &mut val as *mut u64 as *mut libc::c_void,
                     std::mem::size_of::<u64>(),
-                );
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EAGAIN) || err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                    return;
+                }
+                warn!("buffer_ready eventfd read error: {err}");
+                return;
             }
             if let Some(output) = anland.output.clone() {
                 state.niri.queue_redraw(&output);
@@ -734,8 +733,10 @@ impl Anland {
     pub fn push_clipboard(&mut self, text: &[u8]) {
         let event = OutputEvent {
             type_: OUTPUT_TYPE_CLIPBOARD,
-            clipboard: OutputClipboard {
-                size: text.len() as u32,
+            data: OutputEventUnion {
+                clipboard: OutputClipboard {
+                    size: text.len() as u32,
+                },
             },
         };
         self.ctx.push_output_event_with_length(&event, text);
@@ -745,6 +746,7 @@ impl Anland {
     /// events. Non-input notifications (display refresh, clipboard) are
     /// handled internally and not forwarded.
     fn poll_input(&mut self, timeout: i32) -> Vec<SmithayInputEvent<AnlandInput>> {
+        const MAX_EVENT_EXTEND_SIZE: usize = 16 * 1024 * 1024;
         let mut out = Vec::new();
         loop {
             let Some(event) = self.ctx.poll_input_event(timeout) else {
@@ -758,40 +760,36 @@ impl Anland {
                 
                 None => {
                     if event.type_ == anland_sys::INPUT_TYPE_TEXT_INPUT {
-                        let u = unsafe {
-                            let mut u: anland_sys::InputEventUnion = std::mem::zeroed();
-                            std::ptr::copy_nonoverlapping(
-                                &event.touch as *const _ as *const u8,
-                                &mut u as *mut _ as *mut u8,
-                                std::mem::size_of::<anland_sys::InputEventUnion>(),
-                            );
-                            u
-                        };
-                        let size = unsafe { u.text_input.size as usize };
-                        if size > 0 {
+                        let size = unsafe { event.data.text_input.size as usize };
+                        if size > 0 && size <= MAX_EVENT_EXTEND_SIZE {
                             let mut buf = vec![0u8; size];
                             self.ctx.poll_input_event_extend_data(&mut buf, 1000);
-                            if let Ok(text) = String::from_utf8(buf) {
-                                let time = crate::utils::get_monotonic_time().as_millis() as u64;
-                                for c in text.chars() {
-                                    if let Some((keycode, shift)) = char_to_keycode(c) {
-                                        if shift {
+                            match String::from_utf8(buf) {
+                                Ok(text) => {
+                                    let time = crate::utils::get_monotonic_time().as_millis() as u64;
+                                    for c in text.chars() {
+                                        if let Some((keycode, shift)) = char_to_keycode(c) {
+                                            if shift {
+                                                out.push(SmithayInputEvent::Keyboard {
+                                                    event: AnlandKeyboardEvent { time, key_code: 42, state: smithay::backend::input::KeyState::Pressed },
+                                                });
+                                            }
                                             out.push(SmithayInputEvent::Keyboard {
-                                                event: AnlandKeyboardEvent { time, key_code: 42, state: smithay::backend::input::KeyState::Pressed },
+                                                event: AnlandKeyboardEvent { time, key_code: keycode, state: smithay::backend::input::KeyState::Pressed },
                                             });
-                                        }
-                                        out.push(SmithayInputEvent::Keyboard {
-                                            event: AnlandKeyboardEvent { time, key_code: keycode, state: smithay::backend::input::KeyState::Pressed },
-                                        });
-                                        out.push(SmithayInputEvent::Keyboard {
-                                            event: AnlandKeyboardEvent { time, key_code: keycode, state: smithay::backend::input::KeyState::Released },
-                                        });
-                                        if shift {
                                             out.push(SmithayInputEvent::Keyboard {
-                                                event: AnlandKeyboardEvent { time, key_code: 42, state: smithay::backend::input::KeyState::Released },
+                                                event: AnlandKeyboardEvent { time, key_code: keycode, state: smithay::backend::input::KeyState::Released },
                                             });
+                                            if shift {
+                                                out.push(SmithayInputEvent::Keyboard {
+                                                    event: AnlandKeyboardEvent { time, key_code: 42, state: smithay::backend::input::KeyState::Released },
+                                                });
+                                            }
                                         }
                                     }
+                                }
+                                Err(e) => {
+                                    warn!("text_input payload is not valid UTF-8: {e}");
                                 }
                             }
                         }
@@ -820,32 +818,23 @@ impl Anland {
     }
 
     fn handle_special_event(&mut self, event: &InputEvent) -> bool {
-        let u = unsafe {
-            let u: InputEventUnion = std::mem::zeroed();
-            let mut u = u;
-            std::ptr::copy_nonoverlapping(
-                &event.touch as *const InputTouch as *const u8,
-                &mut u as *mut InputEventUnion as *mut u8,
-                std::mem::size_of::<InputEventUnion>(),
-            );
-            u
-        };
+        const MAX_EVENT_EXTEND_SIZE: usize = 16 * 1024 * 1024;
 
         match event.type_ {
             INPUT_TYPE_DISPLAY_REFRESH => {
-                let d = unsafe { u.display };
+                let d = unsafe { event.data.display };
                 debug!("display refresh: {} mHz", d.refresh_mhz);
                 true
             }
             INPUT_TYPE_DISPLAY_ROTATION => {
-                let r = unsafe { u.display_rotation };
+                let r = unsafe { event.data.display_rotation };
                 info!("display rotation: {} deg", r.angle_deg);
                 self.pending_rotation = Some(r.angle_deg);
                 true
             }
             INPUT_TYPE_CLIPBOARD => {
-                let c = unsafe { u.clipboard };
-                if c.size > 0 {
+                let c = unsafe { event.data.clipboard };
+                if c.size > 0 && (c.size as usize) <= MAX_EVENT_EXTEND_SIZE {
                     let mut buf = vec![0u8; c.size as usize];
                     self.ctx.poll_input_event_extend_data(&mut buf, 1000);
                     // Adopt as the Wayland selection on the main event loop so
@@ -862,22 +851,11 @@ impl Anland {
     /// process. Returns `None` for events that carry no input (unknown or
     /// already handled as special).
     fn to_smithay_event(&self, event: &InputEvent) -> Option<SmithayInputEvent<AnlandInput>> {
-        let u = unsafe {
-            let u: InputEventUnion = std::mem::zeroed();
-            let mut u = u;
-            std::ptr::copy_nonoverlapping(
-                &event.touch as *const InputTouch as *const u8,
-                &mut u as *mut InputEventUnion as *mut u8,
-                std::mem::size_of::<InputEventUnion>(),
-            );
-            u
-        };
-
         let time = get_monotonic_time().as_micros() as u64;
 
         match event.type_ {
             INPUT_TYPE_TOUCH => {
-                let t = unsafe { u.touch };
+                let t = unsafe { event.data.touch };
                 debug!(
                     "touch: action={} x={} y={} id={}",
                     t.action, t.x, t.y, t.pointer_id
@@ -885,7 +863,7 @@ impl Anland {
                 let slot = t.pointer_id.max(0) as u32;
                 let (screen_w, screen_h) = self.screen_size();
                 match t.action {
-                    0 => Some(SmithayInputEvent::TouchDown {
+                    INPUT_ACTION_DOWN => Some(SmithayInputEvent::TouchDown {
                         event: AnlandTouchDownEvent {
                             time,
                             slot,
@@ -895,10 +873,10 @@ impl Anland {
                             screen_h,
                         },
                     }),
-                    1 => Some(SmithayInputEvent::TouchUp {
+                    INPUT_ACTION_UP => Some(SmithayInputEvent::TouchUp {
                         event: AnlandTouchUpEvent { time, slot },
                     }),
-                    2 => Some(SmithayInputEvent::TouchMotion {
+                    INPUT_ACTION_MOVE => Some(SmithayInputEvent::TouchMotion {
                         event: AnlandTouchMotionEvent {
                             time,
                             slot,
@@ -908,25 +886,28 @@ impl Anland {
                             screen_h,
                         },
                     }),
+                    INPUT_ACTION_CANCEL => Some(SmithayInputEvent::TouchCancel {
+                        event: AnlandTouchCancelEvent { time, slot },
+                    }),
                     _ => None,
                 }
             }
             INPUT_TYPE_KEY => {
-                let k = unsafe { u.key };
+                let k = unsafe { event.data.key };
                 debug!("key: action={} keycode={}", k.action, k.keycode);
                 Some(SmithayInputEvent::Keyboard {
                     event: AnlandKeyboardEvent {
                         time,
                         key_code: k.keycode.max(0) as u32,
                         state: match k.action {
-                            0 => KeyState::Pressed,
+                            INPUT_ACTION_DOWN => KeyState::Pressed,
                             _ => KeyState::Released,
                         },
                     },
                 })
             }
             INPUT_TYPE_POINTER_MOTION => {
-                let m = unsafe { u.pointer_motion };
+                let m = unsafe { event.data.pointer_motion };
                 debug!(
                     "pointer motion: x={} y={} dx={} dy={}",
                     m.x, m.y, m.dx, m.dy
@@ -943,7 +924,7 @@ impl Anland {
                 })
             }
             INPUT_TYPE_POINTER_BUTTON => {
-                let b = unsafe { u.pointer_button };
+                let b = unsafe { event.data.pointer_button };
                 debug!("pointer button: button={} pressed={}", b.button, b.pressed);
                 Some(SmithayInputEvent::PointerButton {
                     event: AnlandPointerButtonEvent {
@@ -958,7 +939,7 @@ impl Anland {
                 })
             }
             INPUT_TYPE_POINTER_AXIS => {
-                let a = unsafe { u.pointer_axis };
+                let a = unsafe { event.data.pointer_axis };
                 debug!(
                     "pointer axis: axis={} value={} discrete={}",
                     a.axis, a.value, a.discrete
@@ -1062,13 +1043,12 @@ impl Anland {
         niri.update_primary_scanout_output(output, &res.states);
 
         // GPU fence synchronization (Test 13):
-        // Always flush + wait up to 4ms per frame, then check the fence status.
+        // Wait up to 4ms per frame with SYNC_FLUSH_COMMANDS_BIT, then check status.
         // When the GPU completes (ALREADY_SIGNALED or CONDITION_SATISFIED), the
         // Consumer only ever reads fully-rendered pixels — eliminating the
         // out-of-order presentation jitter that timeout=0 caused.
         // 4ms is well within the 8.3ms budget at 120Hz, so full FPS is preserved.
         unsafe {
-            gl::Flush();
             let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
             if !fence.is_null() {
                 let status = gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 4_000_000);
@@ -1080,9 +1060,8 @@ impl Anland {
                     // Consumer can wait on it for cross-process sync.
                     let egl_display_handle =
                         self.renderer.egl_context().display().get_display_handle();
-                    let render_fence_fd = unsafe {
-                        create_native_render_fence(egl_display_handle.handle as *mut _)
-                    };
+                    let render_fence_fd =
+                        create_native_render_fence(egl_display_handle.handle as *mut _);
                     if render_fence_fd >= 0 {
                         self.ctx.set_render_fence(render_fence_fd);
                     } else {

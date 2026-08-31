@@ -139,6 +139,8 @@ impl AdjustableClock {
             return self.current_time;
         }
 
+        const MAX_STEP: Duration = Duration::from_nanos(16_666_667); // ~1/60s
+
         if self.last_seen_time < time {
             let delta = time - self.last_seen_time;
             // Smooth the virtual clock (frame-delta step limiter): cap the
@@ -148,12 +150,12 @@ impl AdjustableClock {
             // scale/transform to jitter. Capping the step keeps the spring
             // moving smoothly frame by frame. At 120Hz a normal delta (~8.3ms)
             // is below this cap, so ordinary presentation is unaffected.
-            const MAX_STEP: Duration = Duration::from_nanos(16_666_667); // ~1/60s
             let delta = delta.min(MAX_STEP);
             let delta = delta.mul_f64(self.rate);
             self.current_time = self.current_time.saturating_add(delta);
         } else {
             let delta = self.last_seen_time - time;
+            let delta = delta.min(MAX_STEP);
             let delta = delta.mul_f64(self.rate);
             self.current_time = self.current_time.saturating_sub(delta);
         }
@@ -178,11 +180,12 @@ mod tests {
         let mut clock = Clock::with_time(Duration::ZERO);
         assert_eq!(clock.now(), Duration::ZERO);
 
-        clock.set_unadjusted(Duration::from_millis(100));
-        assert_eq!(clock.now(), Duration::from_millis(100));
+        // Steps within MAX_STEP (16.67ms) advance 1:1
+        clock.set_unadjusted(Duration::from_millis(10));
+        assert_eq!(clock.now(), Duration::from_millis(10));
 
-        clock.set_unadjusted(Duration::from_millis(200));
-        assert_eq!(clock.now(), Duration::from_millis(200));
+        clock.set_unadjusted(Duration::from_millis(25));
+        assert_eq!(clock.now(), Duration::from_millis(25));
     }
 
     #[test]
@@ -190,22 +193,34 @@ mod tests {
         let mut clock = Clock::with_time(Duration::ZERO);
         clock.set_rate(0.5);
 
-        clock.set_unadjusted(Duration::from_millis(100));
-        assert_eq!(clock.now_unadjusted(), Duration::from_millis(100));
-        assert_eq!(clock.now(), Duration::from_millis(50));
+        // Step 10ms at rate 0.5 -> 5ms
+        clock.set_unadjusted(Duration::from_millis(10));
+        assert_eq!(clock.now_unadjusted(), Duration::from_millis(10));
+        assert_eq!(clock.now(), Duration::from_millis(5));
 
-        clock.set_unadjusted(Duration::from_millis(200));
-        assert_eq!(clock.now_unadjusted(), Duration::from_millis(200));
-        assert_eq!(clock.now(), Duration::from_millis(100));
+        // Step 10ms more (20ms total) at rate 0.5 -> +5ms = 10ms
+        clock.set_unadjusted(Duration::from_millis(20));
+        assert_eq!(clock.now_unadjusted(), Duration::from_millis(20));
+        assert_eq!(clock.now(), Duration::from_millis(10));
 
-        clock.set_unadjusted(Duration::from_millis(150));
-        assert_eq!(clock.now_unadjusted(), Duration::from_millis(150));
-        assert_eq!(clock.now(), Duration::from_millis(75));
+        // Step 10ms backwards (10ms total) at rate 0.5 -> -5ms = 5ms
+        clock.set_unadjusted(Duration::from_millis(10));
+        assert_eq!(clock.now_unadjusted(), Duration::from_millis(10));
+        assert_eq!(clock.now(), Duration::from_millis(5));
 
         clock.set_rate(2.0);
 
-        clock.set_unadjusted(Duration::from_millis(250));
-        assert_eq!(clock.now_unadjusted(), Duration::from_millis(250));
-        assert_eq!(clock.now(), Duration::from_millis(275));
+        // Step 10ms forwards (20ms total) at rate 2.0 -> +20ms = 25ms
+        clock.set_unadjusted(Duration::from_millis(20));
+        assert_eq!(clock.now_unadjusted(), Duration::from_millis(20));
+        assert_eq!(clock.now(), Duration::from_millis(25));
+    }
+
+    #[test]
+    fn step_cap_limits_large_jumps() {
+        let mut clock = Clock::with_time(Duration::ZERO);
+        // Jump by 100ms: should be capped to 16.666667ms
+        clock.set_unadjusted(Duration::from_millis(100));
+        assert_eq!(clock.now(), Duration::from_nanos(16_666_667));
     }
 }

@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 env:
-  DEPS_APT: curl gcc clang pkg-config libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libpipewire-0.3-dev libpango1.0-dev libdisplay-info-dev file
+  DEPS_APT: curl gcc pkg-config libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libpipewire-0.3-dev libpango1.0-dev libdisplay-info-dev file
 
 jobs:
   build:
@@ -42,7 +42,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /root/.cache/ccache
-          key: ccache-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          key: ccache-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'anland-sys/src/**') }}
           restore-keys: |
             ccache-${{ runner.arch }}-
 
@@ -53,9 +53,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
             cargo-${{ runner.arch }}-
 
       - name: Build

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "anland-sys",
     "niri-config",
     "niri-ipc",
     "niri-visual-tests",

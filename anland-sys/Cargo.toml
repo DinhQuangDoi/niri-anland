@@ -9,7 +9,6 @@ license = "MIT"
 cc = "1.2"
 
 [dependencies]
-libloading = "0.8"
 
 [[example]]
 name = "test_anland"

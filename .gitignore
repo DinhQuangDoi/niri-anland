@@ -2,3 +2,7 @@
 /result
 
 .idea
+*.diff
+*.patch
+test.py
+test_egl.rs
