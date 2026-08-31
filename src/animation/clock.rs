@@ -141,6 +141,15 @@ impl AdjustableClock {
 
         if self.last_seen_time < time {
             let delta = time - self.last_seen_time;
+            // Smooth the virtual clock (frame-delta step limiter): cap the
+            // advancement per render tick to one frame (~1/60s). When a frame
+            // is dropped on the Anland/KGSL path, clock jumps would make the
+            // absolute-time spring physics leap ahead, causing the overview
+            // scale/transform to jitter. Capping the step keeps the spring
+            // moving smoothly frame by frame. At 120Hz a normal delta (~8.3ms)
+            // is below this cap, so ordinary presentation is unaffected.
+            const MAX_STEP: Duration = Duration::from_nanos(16_666_667); // ~1/60s
+            let delta = delta.min(MAX_STEP);
             let delta = delta.mul_f64(self.rate);
             self.current_time = self.current_time.saturating_add(delta);
         } else {
