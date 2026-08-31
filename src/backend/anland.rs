@@ -1016,8 +1016,6 @@ impl Anland {
         } else {
             0
         };
-        self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
-        self.frame_count = self.frame_count.wrapping_add(1);
 
         let ctx = RenderCtx {
             renderer: &mut self.renderer,
@@ -1048,6 +1046,18 @@ impl Anland {
                 return RenderResult::Skipped;
             }
         };
+
+        // Only advance the buffer-bank age accounting on a frame that was
+        // actually rendered with damage. Advancing here (vs. at the top) keeps
+        // the computed `age` synchronized with smithay's frame-based
+        // `old_damage` window. Previously we advanced before render_output even
+        // on skip/no-damage frames, so a reused dmabuf could be repainted over
+        // too little old damage, leaving a stale cursor image behind -> ghosting
+        // trail.
+        self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
+        if res.damage.is_some() {
+            self.frame_count = self.frame_count.wrapping_add(1);
+        }
 
         niri.update_primary_scanout_output(output, &res.states);
 
