@@ -4412,11 +4412,15 @@ impl Niri {
                 }};
             }
 
+            let in_overview = self.is_in_overview();
+
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 let ns = Some(ws.id().get() as usize);
                 let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
-                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
+                if !in_overview {
+                    push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
+                    push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
+                }
             }
 
             mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
@@ -4432,10 +4436,12 @@ impl Niri {
                 // damage tracker.
                 let ns = Some(ws.id().get() as usize);
                 let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
-                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
+                if !in_overview {
+                    push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
+                    push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
 
-                process!(geo)(ws.render_background());
+                    process!(geo)(ws.render_background());
+                }
             }
         }
 
