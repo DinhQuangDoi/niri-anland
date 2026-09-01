@@ -2233,6 +2233,10 @@ impl State {
 }
 
 impl Niri {
+    pub fn is_in_overview(&self) -> bool {
+        self.layout.is_in_overview()
+    }
+
     pub fn new(
         config: Rc<RefCell<Config>>,
         event_loop: LoopHandle<'static, State>,

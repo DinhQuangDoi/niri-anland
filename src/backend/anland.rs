@@ -1020,7 +1020,7 @@ impl Anland {
             0
         };
 
-        if self.force_full_damage {
+        if self.force_full_damage || niri.is_in_overview() {
             age = 0;
             self.force_full_damage = false;
         }
