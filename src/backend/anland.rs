@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::mem;
-use std::os::fd::{BorrowedFd, OwnedFd};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::os::fd::{BorrowedFd};
+use std::os::unix::io::RawFd;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -1054,6 +1054,7 @@ impl Anland {
                 return RenderResult::Skipped;
             }
         };
+        drop(target);
 
         // Only advance the buffer-bank age accounting on a frame that was
         // actually rendered with damage. Advancing here (vs. at the top) keeps
