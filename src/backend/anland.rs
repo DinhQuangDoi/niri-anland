@@ -268,7 +268,7 @@ pub struct Anland {
     buf_ready_source_token: Option<RegistrationToken>,
     data_source_token: Option<RegistrationToken>,
     heartbeat_timer_token: Option<RegistrationToken>,
-    force_full_damage: bool,
+    full_damage_frames_remaining: usize,
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
@@ -312,7 +312,7 @@ impl Anland {
             buf_ready_source_token: None,
             data_source_token: None,
             heartbeat_timer_token: None,
-            force_full_damage: false,
+            full_damage_frames_remaining: 0,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,
             pending_rotation: None,
@@ -525,7 +525,9 @@ impl Anland {
 
         // Re-create the damage tracker so its internal frame history is reset
         // and synchronized with the newly connected consumer's dmabuf pool.
-        self.force_full_damage = true;
+        // Force full damage across ALL buffers in the pool (e.g. 4 frames)
+        // so every newly allocated Android buffer is 100% cleanly rendered.
+        self.full_damage_frames_remaining = self.dmabufs.len().max(4);
         if let Some(output) = &self.output {
             self.damage_tracker = Some(OutputDamageTracker::from_output(output));
             niri.queue_redraw(output);
@@ -663,7 +665,8 @@ impl Anland {
         let timer = Timer::from_duration(Duration::from_millis(4000));
         if let Ok(token) = niri.event_loop.insert_source(timer, move |_, _, state| {
             let anland = state.backend.anland();
-            anland.force_full_damage = true;
+            // Consumer timeout is 5s. If we hit 4s without a render, force a full clean repaint.
+            anland.full_damage_frames_remaining = anland.dmabufs.len().max(4);
             if let Some(output) = anland.output.clone() {
                 state.niri.queue_redraw(&output);
             }
@@ -1022,9 +1025,9 @@ impl Anland {
             0
         };
 
-        if self.force_full_damage {
+        if self.full_damage_frames_remaining > 0 {
             age = 0;
-            self.force_full_damage = false;
+            self.full_damage_frames_remaining -= 1;
         }
 
         let ctx = RenderCtx {
