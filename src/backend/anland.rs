@@ -1133,34 +1133,6 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Asynchronous GPU completion signaling (Zero CPU Stall + Zero Tearing):
-        // Create an EGL native sync_file fence and monitor it non-blockingly via Calloop.
-        // The render thread returns immediately (0ms stall), allowing Niri to process
-        // input events and spring physics animations at 120 FPS in parallel with the GPU.
-        // When the GPU finishes rasterizing the frame, the Linux kernel signals the fence FD,
-        // and our event loop callback issues trigger_refresh() to present the completed buffer.
-        let egl_display_handle =
-            self.renderer.egl_context().display().get_display_handle();
-        let render_fence_fd = unsafe {
-            create_native_render_fence(egl_display_handle.handle as *mut _)
-        };
-        self.ctx.set_render_fence(-1);
-
-        if render_fence_fd >= 0 {
-            let source = FenceEventSource { fd: render_fence_fd };
-            let _ = niri.event_loop.insert_source(source, move |_, _, state| {
-                unsafe { libc::close(render_fence_fd); }
-                let anland = state.backend.anland();
-                anland.register_heartbeat_timer(&mut state.niri);
-                anland.ctx.trigger_refresh();
-            });
-        } else {
-            // Fallback if EGL native fence creation is unavailable:
-            unsafe { gl::Flush(); }
-            self.register_heartbeat_timer(niri);
-            self.ctx.trigger_refresh();
-        }
-
         let mut presentation_feedbacks =
             niri.take_presentation_feedbacks(output, &res.states);
         presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
@@ -1202,6 +1174,34 @@ impl Anland {
                 min,
                 1000 / avg.max(1)
             );
+        }
+
+        // Asynchronous GPU completion signaling (Zero CPU Stall + Zero Tearing):
+        // Create an EGL native sync_file fence and monitor it non-blockingly via Calloop.
+        // The render thread returns immediately (0ms stall), allowing Niri to process
+        // input events and spring physics animations at 120 FPS in parallel with the GPU.
+        // When the GPU finishes rasterizing the frame, the Linux kernel signals the fence FD,
+        // and our event loop callback issues trigger_refresh() to present the completed buffer.
+        let egl_display_handle =
+            self.renderer.egl_context().display().get_display_handle();
+        let render_fence_fd = unsafe {
+            create_native_render_fence(egl_display_handle.handle as *mut _)
+        };
+        self.ctx.set_render_fence(-1);
+
+        if render_fence_fd >= 0 {
+            let source = FenceEventSource { fd: render_fence_fd };
+            let _ = niri.event_loop.insert_source(source, move |_, _, state| {
+                unsafe { libc::close(render_fence_fd); }
+                let anland = state.backend.anland();
+                anland.register_heartbeat_timer(&mut state.niri);
+                anland.ctx.trigger_refresh();
+            });
+        } else {
+            // Fallback if EGL native fence creation is unavailable:
+            unsafe { gl::Flush(); }
+            self.register_heartbeat_timer(niri);
+            self.ctx.trigger_refresh();
         }
 
         RenderResult::Submitted
