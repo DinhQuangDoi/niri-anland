@@ -1,4 +1,4 @@
-precision highp float;
+precision mediump float;
 
 #if defined(DEBUG_FLAGS)
 uniform float niri_tint;
@@ -60,11 +60,11 @@ float roundedBoxShadow(vec2 lower, vec2 upper, vec2 point, float sigma, float co
   float start = clamp(-4.5 * sigma, low, high);
   float end = clamp(4.5 * sigma, low, high);
 
-  // Accumulate samples with 8 steps for smooth gradient falloff on high-DPI displays
-  float step = (end - start) / 8.0;
+  // Accumulate samples with 4 steps for optimal GPU fill-rate on mobile TBDR
+  float step = (end - start) / 4.0;
   float y = start + step * 0.5;
   float value = 0.0;
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 4; i++) {
     value += roundedBoxShadowX(point.x, point.y - y, sigma, corner, halfSize) * gaussian(y, sigma) * step;
     y += step;
   }
