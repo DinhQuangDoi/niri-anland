@@ -236,6 +236,63 @@ impl EventSource for FdEventSource {
     }
 }
 
+// Calloop event source for asynchronously polling the GPU render-done fence
+struct FenceEventSource {
+    fd: RawFd,
+}
+
+impl EventSource for FenceEventSource {
+    type Event = ();
+    type Metadata = ();
+    type Ret = ();
+    type Error = std::io::Error;
+
+    fn process_events<F>(
+        &mut self,
+        _readiness: Readiness,
+        _token: Token,
+        mut callback: F,
+    ) -> Result<PostAction, Self::Error>
+    where
+        F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
+    {
+        callback((), &mut ());
+        // Once the fence signals, remove this one-shot source
+        Ok(PostAction::Remove)
+    }
+
+    fn register(
+        &mut self,
+        poll: &mut Poll,
+        token_factory: &mut TokenFactory,
+    ) -> CalloopResult<()> {
+        let token = token_factory.token();
+        unsafe {
+            let fd = BorrowedFd::borrow_raw(self.fd);
+            poll.register(fd, Interest::READ, PollMode::Level, token)
+        }
+    }
+
+    fn reregister(
+        &mut self,
+        poll: &mut Poll,
+        token_factory: &mut TokenFactory,
+    ) -> CalloopResult<()> {
+        let token = token_factory.token();
+        unsafe {
+            let fd = BorrowedFd::borrow_raw(self.fd);
+            poll.reregister(fd, Interest::READ, PollMode::Level, token)
+        }
+    }
+
+    fn unregister(&mut self, poll: &mut Poll) -> CalloopResult<()> {
+        unsafe {
+            let fd = BorrowedFd::borrow_raw(self.fd);
+            poll.unregister(fd)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Anland Backend
 // ---------------------------------------------------------------------------
@@ -1076,20 +1133,33 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        // Non-blocking GPU pipeline flush (Pipelined Concurrency):
-        // Flush all GL commands directly to the Adreno GPU command ringbuffer.
-        // By avoiding synchronous 16ms CPU waits, the CPU is freed immediately (0ms stall)
-        // to process Wayland inputs, spring physics, and queue the next animation frame
-        // in parallel with GPU rasterization — eliminating all Overview and Super+Tab judder.
-        unsafe {
-            gl::Flush();
-            let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
-            if !fence.is_null() {
-                gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 0);
-                gl::DeleteSync(fence);
-            }
-        }
+        // Asynchronous GPU completion signaling (Zero CPU Stall + Zero Tearing):
+        // Create an EGL native sync_file fence and monitor it non-blockingly via Calloop.
+        // The render thread returns immediately (0ms stall), allowing Niri to process
+        // input events and spring physics animations at 120 FPS in parallel with the GPU.
+        // When the GPU finishes rasterizing the frame, the Linux kernel signals the fence FD,
+        // and our event loop callback issues trigger_refresh() to present the completed buffer.
+        let egl_display_handle =
+            self.renderer.egl_context().display().get_display_handle();
+        let render_fence_fd = unsafe {
+            create_native_render_fence(egl_display_handle.handle as *mut _)
+        };
         self.ctx.set_render_fence(-1);
+
+        if render_fence_fd >= 0 {
+            let source = FenceEventSource { fd: render_fence_fd };
+            let _ = niri.event_loop.insert_source(source, move |_, _, state| {
+                unsafe { libc::close(render_fence_fd); }
+                let anland = state.backend.anland();
+                anland.register_heartbeat_timer(&mut state.niri);
+                anland.ctx.trigger_refresh();
+            });
+        } else {
+            // Fallback if EGL native fence creation is unavailable:
+            unsafe { gl::Flush(); }
+            self.register_heartbeat_timer(niri);
+            self.ctx.trigger_refresh();
+        }
 
         let mut presentation_feedbacks =
             niri.take_presentation_feedbacks(output, &res.states);
@@ -1133,12 +1203,6 @@ impl Anland {
                 1000 / avg.max(1)
             );
         }
-
-        // Reset the heartbeat timer since we actually rendered a frame
-        self.register_heartbeat_timer(niri);
-
-        // Signal the consumer ONLY when we actually rendered something.
-        self.ctx.trigger_refresh();
 
         RenderResult::Submitted
     }
