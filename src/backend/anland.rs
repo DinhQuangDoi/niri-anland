@@ -267,6 +267,8 @@ pub struct Anland {
     reconnect_timer_token: Option<RegistrationToken>,
     buf_ready_source_token: Option<RegistrationToken>,
     data_source_token: Option<RegistrationToken>,
+    heartbeat_timer_token: Option<RegistrationToken>,
+    force_full_damage: bool,
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
@@ -309,6 +311,8 @@ impl Anland {
             reconnect_timer_token: None,
             buf_ready_source_token: None,
             data_source_token: None,
+            heartbeat_timer_token: None,
+            force_full_damage: false,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,
             pending_rotation: None,
@@ -527,6 +531,7 @@ impl Anland {
 
         self.register_buffer_ready_source(niri);
         self.register_input_source(niri);
+        self.register_heartbeat_timer(niri);
     }
 
     fn update_output_mode_with(&mut self, dims: Option<(i32, i32)>) {
@@ -646,6 +651,23 @@ impl Anland {
             }
         }) {
             self.buf_ready_source_token = Some(token);
+        }
+    }
+
+    fn register_heartbeat_timer(&mut self, niri: &mut Niri) {
+        if let Some(token) = self.heartbeat_timer_token.take() {
+            let _ = niri.event_loop.remove(token);
+        }
+        let timer = Timer::from_duration(Duration::from_millis(4000));
+        if let Ok(token) = niri.event_loop.insert_source(timer, move |_, _, state| {
+            let anland = state.backend.anland();
+            anland.force_full_damage = true;
+            if let Some(output) = anland.output.clone() {
+                state.niri.queue_redraw(&output);
+            }
+            TimeoutAction::ToDuration(Duration::from_millis(4000))
+        }) {
+            self.heartbeat_timer_token = Some(token);
         }
     }
 
@@ -987,7 +1009,7 @@ impl Anland {
         }
 
         let last = self.last_frame_per_buffer[idx as usize];
-        let age = if last >= 0 {
+        let mut age = if last >= 0 {
             let calculated_age = (self.frame_count - last as u64) as usize;
             if calculated_age >= 1 && calculated_age <= 4 {
                 calculated_age
@@ -997,6 +1019,11 @@ impl Anland {
         } else {
             0
         };
+
+        if self.force_full_damage {
+            age = 0;
+            self.force_full_damage = false;
+        }
 
         let ctx = RenderCtx {
             renderer: &mut self.renderer,
@@ -1035,10 +1062,6 @@ impl Anland {
         // on skip/no-damage frames, so a reused dmabuf could be repainted over
         // too little old damage, leaving a stale cursor image behind -> ghosting
         // trail.
-        self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
-        if res.damage.is_some() {
-            self.frame_count = self.frame_count.wrapping_add(1);
-        }
 
         niri.update_primary_scanout_output(output, &res.states);
 
@@ -1076,7 +1099,6 @@ impl Anland {
         // Always signal the consumer so it does not time out (5s poll
         // in refresh_done). The consumer drives the frame cadence via
         // buf_ready — we must always respond.
-        self.ctx.trigger_refresh();
 
         // If nothing changed on screen, skip frame-callback dispatch
         // and presentation feedback to avoid feeding Noctalia's
@@ -1092,6 +1114,18 @@ impl Anland {
             };
             return RenderResult::NoDamage;
         }
+
+        // Only advance the buffer-bank age accounting if damage is present!
+        self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
+        self.frame_count = self.frame_count.wrapping_add(1);
+
+        // Reset the heartbeat timer since we actually rendered a frame
+        self.register_heartbeat_timer(niri);
+
+        // Signal the consumer ONLY when we actually rendered something.
+        // Sending trigger_refresh on NoDamage would cause the consumer to present
+        // an un-updated buffer full of old artifacts.
+        self.ctx.trigger_refresh();
 
         let mut presentation_feedbacks =
             niri.take_presentation_feedbacks(output, &res.states);
