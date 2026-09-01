@@ -236,63 +236,6 @@ impl EventSource for FdEventSource {
     }
 }
 
-// Calloop event source for asynchronously polling the GPU render-done fence
-struct FenceEventSource {
-    fd: RawFd,
-}
-
-impl EventSource for FenceEventSource {
-    type Event = ();
-    type Metadata = ();
-    type Ret = ();
-    type Error = std::io::Error;
-
-    fn process_events<F>(
-        &mut self,
-        _readiness: Readiness,
-        _token: Token,
-        mut callback: F,
-    ) -> Result<PostAction, Self::Error>
-    where
-        F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
-    {
-        callback((), &mut ());
-        // Once the fence signals, remove this one-shot source
-        Ok(PostAction::Remove)
-    }
-
-    fn register(
-        &mut self,
-        poll: &mut Poll,
-        token_factory: &mut TokenFactory,
-    ) -> CalloopResult<()> {
-        let token = token_factory.token();
-        unsafe {
-            let fd = BorrowedFd::borrow_raw(self.fd);
-            poll.register(fd, Interest::READ, PollMode::Level, token)
-        }
-    }
-
-    fn reregister(
-        &mut self,
-        poll: &mut Poll,
-        token_factory: &mut TokenFactory,
-    ) -> CalloopResult<()> {
-        let token = token_factory.token();
-        unsafe {
-            let fd = BorrowedFd::borrow_raw(self.fd);
-            poll.reregister(fd, Interest::READ, PollMode::Level, token)
-        }
-    }
-
-    fn unregister(&mut self, poll: &mut Poll) -> CalloopResult<()> {
-        unsafe {
-            let fd = BorrowedFd::borrow_raw(self.fd);
-            poll.unregister(fd)
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Anland Backend
 // ---------------------------------------------------------------------------
@@ -582,8 +525,10 @@ impl Anland {
 
         // Re-create the damage tracker so its internal frame history is reset
         // and synchronized with the newly connected consumer's dmabuf pool.
+        self.force_full_damage = true;
         if let Some(output) = &self.output {
             self.damage_tracker = Some(OutputDamageTracker::from_output(output));
+            niri.queue_redraw(output);
         }
 
         self.register_buffer_ready_source(niri);
@@ -1176,33 +1121,28 @@ impl Anland {
             );
         }
 
-        // Asynchronous GPU completion signaling (Zero CPU Stall + Zero Tearing):
-        // Create an EGL native sync_file fence and monitor it non-blockingly via Calloop.
-        // The render thread returns immediately (0ms stall), allowing Niri to process
-        // input events and spring physics animations at 120 FPS in parallel with the GPU.
-        // When the GPU finishes rasterizing the frame, the Linux kernel signals the fence FD,
-        // and our event loop callback issues trigger_refresh() to present the completed buffer.
+        // Hardware GPU fence delivery to Android SurfaceFlinger:
+        // Create an EGL native sync_file fence and transfer it to the Consumer APK via SCM_RIGHTS.
+        // SurfaceFlinger waits on this fence asynchronously on the GPU before scanout.
+        // This ensures 0ms CPU stall, zero tearing, and clean reconnect recovery.
         let egl_display_handle =
             self.renderer.egl_context().display().get_display_handle();
         let render_fence_fd = unsafe {
             create_native_render_fence(egl_display_handle.handle as *mut _)
         };
-        self.ctx.set_render_fence(-1);
 
         if render_fence_fd >= 0 {
-            let source = FenceEventSource { fd: render_fence_fd };
-            let _ = niri.event_loop.insert_source(source, move |_, _, state| {
-                unsafe { libc::close(render_fence_fd); }
-                let anland = state.backend.anland();
-                anland.register_heartbeat_timer(&mut state.niri);
-                anland.ctx.trigger_refresh();
-            });
+            self.ctx.set_render_fence(render_fence_fd);
         } else {
-            // Fallback if EGL native fence creation is unavailable:
             unsafe { gl::Flush(); }
-            self.register_heartbeat_timer(niri);
-            self.ctx.trigger_refresh();
+            self.ctx.set_render_fence(-1);
         }
+
+        // Reset the heartbeat timer since we actually rendered a frame
+        self.register_heartbeat_timer(niri);
+
+        // Signal the consumer ONLY when we actually rendered something.
+        self.ctx.trigger_refresh();
 
         RenderResult::Submitted
     }
