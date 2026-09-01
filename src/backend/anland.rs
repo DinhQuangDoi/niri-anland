@@ -1067,39 +1067,19 @@ impl Anland {
         niri.update_primary_scanout_output(output, &res.states);
 
         // GPU fence synchronization:
-        // Attempt to create a hardware Android native fence (sync_file fd) via EGL.
-        // If supported, Android's SurfaceFlinger will wait on this fence asynchronously
-        // on the GPU without requiring Niri's render thread to block on the CPU.
-        // If native fence creation fails (e.g. unsupported by Mesa KGSL driver),
-        // fall back to glClientWaitSync with a 16ms timeout so the CPU waits for the
-        // GPU to finish before signaling the Consumer — eliminating diagonal tearing/glitches.
-        let egl_display_handle =
-            self.renderer.egl_context().display().get_display_handle();
-        let render_fence_fd = unsafe {
-            create_native_render_fence(egl_display_handle.handle as *mut _)
-        };
+        // Native Android fences exported from Linux Mesa are unstable across
+        // container reconnects and cause diagonal tearing. We must force a CPU wait (16ms)
+        // for ALL frames to ensure the GPU finishes rendering completely before
+        // we signal the Android Consumer.
 
-        if render_fence_fd >= 0 {
-            self.ctx.set_render_fence(render_fence_fd);
-        } else {
-            static WARN_FALLBACK: std::sync::Once = std::sync::Once::new();
-            WARN_FALLBACK.call_once(|| {
-                info!("native fence creation returned -1, using glClientWaitSync fallback");
-            });
-
-            unsafe {
-                let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
-                if !fence.is_null() {
-                    gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 16_000_000);
-                    gl::DeleteSync(fence);
-                }
+        unsafe {
+            let fence = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
+            if !fence.is_null() {
+                gl::ClientWaitSync(fence, gl::SYNC_FLUSH_COMMANDS_BIT, 16_000_000);
+                gl::DeleteSync(fence);
             }
-            self.ctx.set_render_fence(-1);
         }
-
-        // Always signal the consumer so it does not time out (5s poll
-        // in refresh_done). The consumer drives the frame cadence via
-        // buf_ready — we must always respond.
+        self.ctx.set_render_fence(-1);
 
         // If nothing changed on screen, skip frame-callback dispatch
         // and presentation feedback to avoid feeding Noctalia's

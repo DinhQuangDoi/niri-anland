@@ -5012,7 +5012,7 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn is_in_overview(&self) -> bool {
-        self.overview_progress.is_some() || self.overview_open
+        self.overview_progress.is_some()
     }
 }
 
