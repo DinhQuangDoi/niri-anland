@@ -1120,13 +1120,6 @@ impl Anland {
         self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
         self.frame_count = self.frame_count.wrapping_add(1);
 
-        // Reset the heartbeat timer since we actually rendered a frame
-        self.register_heartbeat_timer(niri);
-
-        // Signal the consumer ONLY when we actually rendered something.
-        // Sending trigger_refresh on NoDamage would cause the consumer to present
-        // an un-updated buffer full of old artifacts.
-        self.ctx.trigger_refresh();
 
         let mut presentation_feedbacks =
             niri.take_presentation_feedbacks(output, &res.states);
@@ -1170,6 +1163,14 @@ impl Anland {
                 1000 / avg.max(1)
             );
         }
+
+        // Reset the heartbeat timer since we actually rendered a frame
+        self.register_heartbeat_timer(niri);
+
+        // Signal the consumer ONLY when we actually rendered something.
+        // Sending trigger_refresh on NoDamage would cause the consumer to present
+        // an un-updated buffer full of old artifacts.
+        self.ctx.trigger_refresh();
 
         RenderResult::Submitted
     }
